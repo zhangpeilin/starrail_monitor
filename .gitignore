@@ -1,0 +1,7 @@
+venv/
+__pycache__/
+*.pyc
+logs/
+config.json
+elev_result.txt
+elev_pw.png
