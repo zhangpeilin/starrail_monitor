@@ -1372,8 +1372,8 @@ class MonitorApp:
                 turn, action, info, col_img = self.recognize(use_persistent=True)
                 if turn is None or action is None:
                     fail_streak += 1
-                    # 未识别帧也计入丢弃计数（加速长期失败时的基线兜底重置）
-                    self.filter.reject()
+                    # 未识别帧不计入兜底计数：基线未被污染，新版低位闸门
+                    # 已能在读到真实值时直接恢复（回合重置高位接受）
                     if fail_streak >= 3 and self.capture is not None:
                         # 捕获器可能已失效（如游戏窗口重建），重建一次
                         try:
@@ -1414,7 +1414,13 @@ class MonitorApp:
                                 "info": "t%d/a%d" % (turn, action)})
                             continue
                     if not accepted:
-                        self.filter.reject()
+                        # 兜底计数仅限「基线污染信号」：突变不允许/突变序列无效
+                        # 只在基线低位可疑时出现（基线正确时回合0不可能突变）；
+                        # 骤降/超范围/低位拒绝等识别错误类是成功防御，不计数——
+                        # 基线未污染，读到真实值即可恢复，计数反而引发无谓重置
+                        if (drop_reason.startswith("突变不允许")
+                                or drop_reason.startswith("突变序列无效")):
+                            self.filter.reject()
                         self.msg_queue.put({"status": "丢弃(%s)" % drop_reason,
                                             "info": "t%d/a%d" % (turn, action)})
                         continue
