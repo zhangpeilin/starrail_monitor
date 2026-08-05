@@ -339,6 +339,43 @@ def test_reset_cooldown_expired():
     ok("冷却后首帧低位接受", r == (True, ""))
 
 
+# 28. 归零回弹拒绝：行动值归零后同回合不回弹（新对局识别错值防护）
+def test_zero_rebound():
+    vf = ValueFilter(max_turn=99, max_action=100)
+    vf.accept(0, 0)
+    r = vf.check(0, 1)
+    ok("归零回弹拒绝(0,0)→(0,1)", r[0] is False and "回弹" in r[1])
+    vf.reject()
+    r2 = vf.check(0, 0)
+    ok("归零保持接受(0,0)→(0,0)", r2 == (True, ""))
+    vf.accept(0, 0)
+    vf2 = ValueFilter(max_turn=99, max_action=100)
+    vf2.accept(1, 0)
+    r3 = vf2.check(1, 2)
+    ok("1回合归零回弹拒绝(1,0)→(1,2)", r3[0] is False and "回弹" in r3[1])
+    vf2.reject()
+    r4 = vf2.check(0, 100)
+    ok("归零后回合切换高位接受(1,0)→(0,100)", r4 == (True, ""))
+    vf2.accept(0, 100)
+
+
+# 29. 16:51 误报场景还原：战斗结束(0,0) → 新对局错值全拒 → 真实(1,89)新对局确认
+def test_zero_rebound_scenario():
+    vf = ValueFilter(max_turn=99, max_action=100)
+    vf.accept(0, 0)          # 16:49:20 战斗结束
+    r1 = vf.check(0, 1)      # 16:51:04 新对局错值 (0,1) → 归零回弹拒
+    r2 = vf.check(0, 9)      # 突变不允许拒
+    r3 = vf.check(0, 92)     # 突变不允许拒
+    r4 = vf.check(0, 4)      # 16:51:16 归零回弹拒（基线保持0）
+    ok("战斗结束后的低位错值全拒", r1[0] is False and r2[0] is False
+       and r3[0] is False and r4[0] is False)
+    r5 = vf.check(1, 89)     # 真实新对局 (1,89) → 回合增大候选
+    r6 = vf.check(1, 89)
+    r7 = vf.check(1, 89)
+    ok("真实新对局三帧确认", r7 == (True, "新对局(回合增大确认)"))
+    vf.accept(1, 89)
+
+
 def main():
     test_first_frame()
     test_decrease()
@@ -367,6 +404,8 @@ def main():
     test_reset_first_frame_low()
     test_startup_first_frame_low()
     test_reset_cooldown_expired()
+    test_zero_rebound()
+    test_zero_rebound_scenario()
     print("----")
     print("%d 项通过" % PASS)
     if FAIL:

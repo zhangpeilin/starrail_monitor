@@ -495,6 +495,10 @@ class ValueFilter:
                 # 位数骤降：两位数→一位数（十位消失的丢位，如 13→3）
                 # 即使降幅 <20 也拒绝；三位→两位（100→90 正常快速下降）不拦
                 return False, "行动值骤降(%d→%d)" % (la, action)
+            if la == 0 and action > 0:
+                # 归零回弹：行动值归零=回合切换/战斗结束（机制上同回合不回弹），
+                # 回弹值=新对局识别错值（如真实1回合100被读成(0,1)）→ 拒绝
+                return False, "行动值归零回弹(%d→%d)" % (la, action)
             self.reset_candidates = []
             return True, ""
         # 同回合行动值突变
