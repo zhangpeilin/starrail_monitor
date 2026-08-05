@@ -826,10 +826,27 @@ DEFAULT_CONFIG = {
 # --------------------------------------------------------------------------
 # 识别记录：历史 CSV + 成功画面存档
 # --------------------------------------------------------------------------
+_GUI_LOG_LOCK = threading.Lock()
+
+
+def append_gui_log(ts, msg):
+    """把 GUI 滚动日志同步追加到 logs/gui_YYYY-MM-DD.log（按天滚动）"""
+    try:
+        today = datetime.now().strftime("%Y-%m-%d")
+        path = os.path.join(SCRIPT_DIR, "logs", "gui_%s.log" % today)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with _GUI_LOG_LOCK:
+            with open(path, "a", encoding="utf-8") as f:
+                f.write("[%s] %s\n" % (ts, msg))
+    except Exception:
+        pass
+
+
 class Recorder:
     """监控记录器：
       - logs/history_YYYY-MM-DD.csv  每次识别成功一行（时间,回合数,行动值,提醒,说明）
       - logs/frames/                 数字变化或触发提醒时的列区域画面（自动保留最近 N 张）
+      - logs/gui_YYYY-MM-DD.log      程序界面滚动日志（未识别/丢弃/事件等）完整落盘
     """
 
     def __init__(self, base_dir, max_frames=500):
@@ -1073,6 +1090,7 @@ class MonitorApp:
             self.txt_log.insert("end", "[%s] %s\n" % (ts, msg))
         self.txt_log.see("end")
         self.txt_log.configure(state="disabled")
+        append_gui_log(ts, msg)
 
     # ---------------- 捕获后端管理 ----------------
     def _make_capture(self):
