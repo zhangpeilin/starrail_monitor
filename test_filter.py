@@ -303,6 +303,42 @@ def test_false_alarm_scenario():
     ok("重置后真实高位首帧接受", r == (True, ""))
 
 
+# 25. 重置后首帧低位拒绝（16:14 误报场景：兜底重置后首帧 (0,4) 是丢位）
+def test_reset_first_frame_low():
+    vf = ValueFilter(max_turn=99, max_action=100, reset_after=15)
+    vf.accept(1, 10)
+    for _ in range(20):
+        vf.reject()         # 连续未识别 → 兜底重置
+    ok("兜底重置", vf.last is None)
+    r = vf.check(0, 4)      # 重置后首帧低位 → 拒绝
+    ok("重置后首帧低位拒绝(0,4)", r[0] is False and "首帧低位" in r[1])
+    vf.reject()
+    r2 = vf.check(0, 9)     # 仍低位 → 拒绝
+    ok("重置后低位持续拒绝(0,9)", r2[0] is False and "首帧低位" in r2[1])
+    vf.reject()
+    r3 = vf.check(0, 88)    # 读到真实高位 → 接受
+    ok("重置后真实高位接受(0,88)", r3 == (True, ""))
+
+
+# 26. 启动首帧低位正常接受（reset_ts=0 不受冷却限制，防功能损失）
+def test_startup_first_frame_low():
+    vf = ValueFilter(max_turn=99, max_action=100)
+    r = vf.check(0, 20)
+    ok("启动首帧低位接受(0,20)", r == (True, ""))
+
+
+# 27. 冷却过期后首帧低位接受（真实战斗尾声）
+def test_reset_cooldown_expired():
+    vf = ValueFilter(max_turn=99, max_action=100, reset_after=15)
+    vf.accept(1, 10)
+    for _ in range(15):
+        vf.reject()
+    ok("兜底重置", vf.last is None and vf.reset_ts > 0)
+    vf.reset_ts -= 11      # 模拟冷却已过
+    r = vf.check(0, 9)
+    ok("冷却后首帧低位接受", r == (True, ""))
+
+
 def main():
     test_first_frame()
     test_decrease()
@@ -328,6 +364,9 @@ def main():
     test_persistent_drop_confirm_reject()
     test_new_game_low_action()
     test_false_alarm_scenario()
+    test_reset_first_frame_low()
+    test_startup_first_frame_low()
+    test_reset_cooldown_expired()
     print("----")
     print("%d 项通过" % PASS)
     if FAIL:

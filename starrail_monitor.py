@@ -451,6 +451,12 @@ class ValueFilter:
         if not (0 <= action <= self.max_action):
             return False, "行动值超范围(%d)" % action
         if self.last is None:
+            # 兜底重置后短时间内：首帧低位（<30）视为丢位拒绝。
+            # 重置前已连续失败 ~7.5 秒，真实值必为高位（100 递减仍在 60+），
+            # 低位首帧 = 丢位误读（如真实 94 被读成 4）；冷却过后低位即真实（战斗尾声）
+            if self.reset_ts and time.time() - self.reset_ts < 10 \
+                    and action < self.turn_drop_action_min:
+                return False, "重置后首帧低位(%d)" % action
             return True, ""
         lt, la = self.last
         # 闸门3：回合数减小 = 合法重置（接受）；行动值必为高位（重置回100附近），
