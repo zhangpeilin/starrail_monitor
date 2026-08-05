@@ -2,3 +2,4 @@ pillow
 numpy
 pytesseract
 winocr
+opencv-python-headless

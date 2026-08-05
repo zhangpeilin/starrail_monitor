@@ -226,10 +226,21 @@ def merge_components(comps, gap=6):
 # 倒计时条提取
 # --------------------------------------------------------------------------
 class Extractor:
-    """从倒计时条区域图像中提取 回合数 / 行动值 数字串"""
+    """从倒计时条区域图像中提取 回合数 / 行动值 数字串
 
-    def __init__(self, ocr):
+    数字识别优先用 TemplateMatcher（OpenCV 模板匹配，固定字体抗像素级缺陷），
+    失败时回退 Tesseract OCR。
+    """
+
+    def __init__(self, ocr, matcher=None):
         self.ocr = ocr
+        if matcher is None:
+            try:
+                from template_matcher import TemplateMatcher
+                matcher = TemplateMatcher()
+            except Exception:
+                matcher = None
+        self.matcher = matcher
 
     def extract(self, img):
         """
@@ -342,8 +353,15 @@ class Extractor:
                     turn_img = mask_to_image(same_mask, tx0, ty0, tx1, ty1)
                     info.append("回合数字区域(%d,%d)-(%d,%d)" % (tx0, ty0, tx1, ty1))
 
-        turn_groups = self.ocr.read(turn_img, retry_big=True) if turn_img is not None else []
-        action_groups = self.ocr.read(action_img, vote=True) if action_img is not None else []
+        turn_groups = action_groups = []
+        if turn_img is not None:
+            turn_groups = self.matcher.read(turn_img) if self.matcher else []
+            if not turn_groups:
+                turn_groups = self.ocr.read(turn_img, retry_big=True)
+        if action_img is not None:
+            action_groups = self.matcher.read(action_img) if self.matcher else []
+            if not action_groups:
+                action_groups = self.ocr.read(action_img, vote=True)
 
         # 兜底：整区域直接识别，取最后两个数字串
         raw_groups = []
@@ -398,12 +416,14 @@ class ValueFilter:
          且发生在 行动值>0、回合数>0 时 → 允许（视为新回合重置），否则丢弃
       5) 新对局：回合数增大时（旧对局结束、新对局从高位回合开始），
          开关开启时同样三帧确认（连续 3 帧回合数等值/递减）→ 接受为新对局
+      6) 同回合向下突变：一帧内行动值降幅超过 20（如 99 被误读成 9 的丢位）
+         → 拒绝且不更新基线，避免丢位污染基线导致后续正确值被误判为突变
     丢弃帧不记录、不存档、不参与提醒判断。突变确认/新对局确认返回事件标记。
     """
 
     def __init__(self, max_turn=99, max_action=100, action_tolerance=5,
                  reset_after=30, allow_reset=True, reset_turn_min=1,
-                 reset_action_min=1):
+                 reset_action_min=1, action_drop_max=20):
         self.max_turn = max_turn
         self.max_action = max_action
         self.action_tolerance = action_tolerance   # 行动值允许的微小回弹容差
@@ -411,6 +431,7 @@ class ValueFilter:
         self.allow_reset = allow_reset             # 行动值突变允许开关
         self.reset_turn_min = reset_turn_min       # 突变允许的回合数下限（回合数>0 才允许）
         self.reset_action_min = reset_action_min   # 突变允许的行动值下限（行动值>0 才允许）
+        self.action_drop_max = action_drop_max     # 同回合一帧内最大允许降幅（超过=丢位误读）
         self.last = None
         self.drop_streak = 0
         self.reset_candidates = []                 # 突变候选帧（三帧确认）
@@ -448,6 +469,10 @@ class ValueFilter:
             return False, "回合增大无效(数值跳动)"
         # 闸门2：同一回合内行动值只递减（允许微小回弹容差）
         if action <= la + self.action_tolerance:
+            if action < la - self.action_drop_max:
+                # 向下突变：同回合内一帧降幅过大（如 99 被误读成 9 的丢位）
+                # → 拒绝，基线保持不变，下一帧正确值仍可正常接受
+                return False, "行动值骤降(%d→%d)" % (la, action)
             self.reset_candidates = []
             return True, ""
         # 同回合行动值突变
@@ -792,6 +817,7 @@ DEFAULT_CONFIG = {
     "allow_action_reset": True,      # 行动值突变允许开关（三帧确认）
     "reset_turn_min": 1,             # 突变允许的回合数下限（回合数>0 才允许）
     "reset_action_min": 1,           # 突变允许的行动值下限（行动值>0 才允许）
+    "action_drop_max": 20,           # 同回合一帧内最大允许降幅（超过=丢位误读丢弃）
 }
 
 
@@ -897,7 +923,8 @@ class MonitorApp:
             max_action=self.cfg.get("max_action", 100),
             allow_reset=self.cfg.get("allow_action_reset", True),
             reset_turn_min=self.cfg.get("reset_turn_min", 1),
-            reset_action_min=self.cfg.get("reset_action_min", 1))
+            reset_action_min=self.cfg.get("reset_action_min", 1),
+            action_drop_max=self.cfg.get("action_drop_max", 20))
         self.monitor_thread = None
         self.stop_event = threading.Event()
         self.msg_queue = queue.Queue()

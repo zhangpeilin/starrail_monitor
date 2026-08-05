@@ -177,6 +177,49 @@ def test_drop_streak_reset():
     ok("兜底后首帧接受", r2 == (True, ""))
 
 
+# 15. 丢位防护：高位 99 被误读成 9 → 拒绝且不污染基线，后续 96 正常接受
+def test_drop_digit_guard():
+    vf = ValueFilter(max_turn=99, max_action=100, action_drop_max=20)
+    vf.accept(0, 99)
+    r1 = vf.check(0, 9)     # 丢位帧：99→9 骤降 90 → 拒绝
+    r2 = vf.check(0, 96)    # 正确值：96 <= 99+5 → 正常接受
+    ok("丢位帧拒绝且基线不污染", r1[0] is False and "骤降" in r1[1]
+       and r2 == (True, ""))
+    vf.accept(0, 96)
+
+
+# 16. 用户场景：1回合0行动 → 0回合99 → 丢位9 → 96 仍应接受
+def test_user_scenario():
+    vf = ValueFilter(max_turn=99, max_action=100, action_drop_max=20)
+    vf.accept(1, 0)
+    r0 = vf.check(0, 99)    # 回合减小重置 → 接受
+    ok("回合减小重置", r0 == (True, ""))
+    vf.accept(0, 99)
+    r1 = vf.check(0, 9)     # 丢位 → 拒绝
+    r2 = vf.check(0, 96)    # 正确值 → 接受
+    ok("丢位后正确值仍接受", r1[0] is False and r2 == (True, ""))
+
+
+# 17. 骤降边界：降幅 20 允许，降幅 21 拒绝
+def test_drop_boundary():
+    vf = ValueFilter(max_turn=99, max_action=100, action_drop_max=20)
+    vf.accept(0, 30)
+    r1 = vf.check(0, 10)    # 降 20 → 允许
+    ok("降幅20允许", r1 == (True, ""))
+    vf.accept(0, 30)
+    r2 = vf.check(0, 9)     # 降 21 → 拒绝
+    ok("降幅21拒绝", r2[0] is False and "骤降" in r2[1])
+    vf.reject()
+
+
+# 18. 低位小降正常：不误伤正常递减
+def test_drop_low_value():
+    vf = ValueFilter(max_turn=99, max_action=100, action_drop_max=20)
+    vf.accept(0, 10)
+    r = vf.check(0, 8)
+    ok("低位小降接受", r == (True, ""))
+
+
 def main():
     test_first_frame()
     test_decrease()
@@ -192,6 +235,10 @@ def main():
     test_mutation_low_action()
     test_range_gate()
     test_drop_streak_reset()
+    test_drop_digit_guard()
+    test_user_scenario()
+    test_drop_boundary()
+    test_drop_low_value()
     print("----")
     print("%d 项通过" % PASS)
     if FAIL:
