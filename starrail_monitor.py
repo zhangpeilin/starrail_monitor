@@ -818,6 +818,8 @@ DEFAULT_CONFIG = {
     "reset_turn_min": 1,             # 突变允许的回合数下限（回合数>0 才允许）
     "reset_action_min": 1,           # 突变允许的行动值下限（行动值>0 才允许）
     "action_drop_max": 20,           # 同回合一帧内最大允许降幅（超过=丢位误读丢弃）
+    "rapid_recheck": True,           # RapidOCR 低频复核（突变/骤降帧二次确认）
+    "rapid_baseline_s": 6,           # 周期基线校准间隔（秒，RapidOCR 复核）
 }
 
 
@@ -925,6 +927,13 @@ class MonitorApp:
             reset_turn_min=self.cfg.get("reset_turn_min", 1),
             reset_action_min=self.cfg.get("reset_action_min", 1),
             action_drop_max=self.cfg.get("action_drop_max", 20))
+        # RapidOCR 低频复核器（突变/骤降帧二次确认 + 6秒基线校准）
+        try:
+            from rapid_recheck import RapidRechecker
+            self.rapid = RapidRechecker(min_interval=3.0)
+        except Exception:
+            self.rapid = None
+        self.last_rapid_base = 0.0
         self.monitor_thread = None
         self.stop_event = threading.Event()
         self.msg_queue = queue.Queue()
@@ -1334,15 +1343,37 @@ class MonitorApp:
                 fail_streak = 0
                 # 合理性闸门：范围 + 同回合递减 + 回合减小重置，离谱结果直接丢弃
                 ok_val, drop_reason = self.filter.check(turn, action)
+                accepted = ok_val
                 if not ok_val:
-                    self.filter.reject()
                     self.consecutive = 0
-                    self.msg_queue.put({"status": "丢弃(%s)" % drop_reason,
-                                        "info": "t%d/a%d" % (turn, action)})
-                    continue
+                    # RapidOCR 低频复核：向上突变候选帧 / 向下骤降帧
+                    # （复核一致 → 直接确认基线；骤降复核出高位 → 确认丢位拒绝）
+                    if (drop_reason.startswith("突变待确认")
+                            or drop_reason.startswith("行动值骤降")) \
+                            and self.cfg.get("rapid_recheck", True) \
+                            and self.rapid is not None:
+                        ra = self.rapid.recheck_action(col_img)
+                        if ra is not None and ra == action:
+                            self.filter.accept(turn, action)
+                            drop_reason = ("突变确认(Rapid复核)"
+                                           if drop_reason.startswith("突变待确认")
+                                           else "骤降确认(Rapid复核)")
+                            accepted = True
+                        elif ra is not None:
+                            # 复核不一致（如骤降帧 RapidOCR 读出高位）→ 确认丢位
+                            self.filter.reject()
+                            self.msg_queue.put({
+                                "status": "丢弃(骤降Rapid复核=%d)" % ra,
+                                "info": "t%d/a%d" % (turn, action)})
+                            continue
+                    if not accepted:
+                        self.filter.reject()
+                        self.msg_queue.put({"status": "丢弃(%s)" % drop_reason,
+                                            "info": "t%d/a%d" % (turn, action)})
+                        continue
                 self.filter.accept(turn, action)
                 if drop_reason:
-                    # 特殊事件（突变确认/新对局）：在说明与日志中标记
+                    # 特殊事件（突变确认/新对局/骤降确认）：在说明与日志中标记
                     info = "%s %s" % (drop_reason, info) if info else drop_reason
                 hit = (turn == self.cfg["turn_threshold"]
                        and action < self.cfg["action_threshold"])
@@ -1368,6 +1399,21 @@ class MonitorApp:
                 except Exception:
                     pass
                 self.msg_queue.put({"status": "监测中", "turn": turn, "action": action, "info": info})
+                # 周期基线校准：每 6 秒用 RapidOCR 复核一次行动值，
+                # 与基线差异大（如首帧/回合切换帧吞入丢位值）→ 校准基线
+                if self.cfg.get("rapid_recheck", True) and self.rapid is not None \
+                        and col_img is not None \
+                        and time.time() - self.last_rapid_base \
+                        >= self.cfg.get("rapid_baseline_s", 6):
+                    self.last_rapid_base = time.time()
+                    ra = self.rapid.recheck_action(col_img)
+                    if ra is not None and self.filter.last:
+                        lt, la = self.filter.last
+                        if ra != la and abs(ra - la) > 10:
+                            self.filter.accept(lt, ra)
+                            self.msg_queue.put({
+                                "status": "基线校准",
+                                "info": "a%d→a%d(Rapid复核)" % (la, ra)})
             except Exception as e:
                 self.msg_queue.put({"status": "异常: %s" % e})
                 self.consecutive = 0
@@ -1431,7 +1477,9 @@ class MonitorApp:
                 elif msg.get("status", "").startswith("丢弃"):
                     self.log("%s (%s)" % (msg["status"], msg.get("info", "")),
                              tag="drop")
-                elif "突变确认" in msg.get("info", "") or "新对局" in msg.get("info", ""):
+                elif ("突变确认" in msg.get("info", "") or "新对局" in msg.get("info", "")
+                      or "骤降确认" in msg.get("info", "")
+                      or "基线校准" in msg.get("info", "")):
                     self.log("事件: %s" % msg["info"], tag="event")
         except queue.Empty:
             pass
