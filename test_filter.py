@@ -130,9 +130,9 @@ def test_new_game_single_error():
     vf = ValueFilter(max_turn=99, max_action=100)
     vf.accept(0, 4)
     r1 = vf.check(3, 90)   # 单帧误读
-    r2 = vf.check(0, 3)    # 回落，回合减小 → 接受
+    r2 = vf.check(0, 4)    # 回落同值 → 正常接受，候选清空
     ok("单帧回合增大不误确认", r1[0] is False and r2 == (True, ""))
-    vf.accept(0, 3)
+    vf.accept(0, 4)
 
 
 # 11. 新对局：开关关闭 → 直接拒绝
@@ -256,6 +256,53 @@ def test_reject_streak_recovery():
     ok("兜底重置后高位值首帧接受", r == (True, ""))
 
 
+# 21. 回合减小帧行动值低位拒绝（重置必为高位，低位=丢位误读）
+def test_turn_drop_low_action():
+    vf = ValueFilter(max_turn=99, max_action=100)
+    vf.accept(1, 1)
+    r = vf.check(0, 9)
+    ok("回合重置行动值低位拒绝(1→0, a9)", r[0] is False and "低位" in r[1])
+    vf.reject()
+
+
+# 22. 持续丢位三帧确认拒绝（真实99被读成9，3帧等值也不可信）
+def test_persistent_drop_confirm_reject():
+    vf = ValueFilter(max_turn=99, max_action=100)
+    vf.accept(1, 1)
+    r1 = vf.check(1, 9)
+    r2 = vf.check(1, 9)
+    r3 = vf.check(1, 9)
+    ok("突变确认值低位拒绝(3帧等值9)", r1[0] is False and r2[0] is False
+       and r3[0] is False and "低位" in r3[1])
+    vf.reject()
+
+
+# 23. 新对局确认值低位拒绝（0→1 新对局但 action 9，持续丢位）
+def test_new_game_low_action():
+    vf = ValueFilter(max_turn=99, max_action=100)
+    vf.accept(0, 4)
+    r1 = vf.check(1, 9)
+    r2 = vf.check(1, 9)
+    r3 = vf.check(1, 9)
+    ok("新对局确认值低位拒绝", r1[0] is False and r2[0] is False
+       and r3[0] is False and "低位" in r3[1])
+    vf.reject()
+
+
+# 24. 误报场景还原：基线(1,1)→突变确认低位拒→兜底重置→高位首帧接受
+def test_false_alarm_scenario():
+    vf = ValueFilter(max_turn=99, max_action=100, reset_after=15)
+    vf.accept(1, 1)
+    for _ in range(3):
+        vf.check(1, 9)      # 突变候选3帧 → 确认值低位拒绝
+        vf.reject()
+    for _ in range(12):
+        vf.reject()         # 兜底重置
+    ok("兜底重置", vf.last is None)
+    r = vf.check(0, 88)
+    ok("重置后真实高位首帧接受", r == (True, ""))
+
+
 def main():
     test_first_frame()
     test_decrease()
@@ -277,6 +324,10 @@ def main():
     test_drop_low_value()
     test_digit_drop()
     test_reject_streak_recovery()
+    test_turn_drop_low_action()
+    test_persistent_drop_confirm_reject()
+    test_new_game_low_action()
+    test_false_alarm_scenario()
     print("----")
     print("%d 项通过" % PASS)
     if FAIL:

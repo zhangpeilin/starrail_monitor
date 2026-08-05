@@ -425,7 +425,8 @@ class ValueFilter:
 
     def __init__(self, max_turn=99, max_action=100, action_tolerance=5,
                  reset_after=15, allow_reset=True, reset_turn_min=1,
-                 reset_action_min=1, action_drop_max=20):
+                 reset_action_min=1, action_drop_max=20,
+                 turn_drop_action_min=30):
         self.max_turn = max_turn
         self.max_action = max_action
         self.action_tolerance = action_tolerance   # 行动值允许的微小回弹容差
@@ -434,6 +435,7 @@ class ValueFilter:
         self.reset_turn_min = reset_turn_min       # 突变允许的回合数下限（回合数>0 才允许）
         self.reset_action_min = reset_action_min   # 突变允许的行动值下限（行动值>0 才允许）
         self.action_drop_max = action_drop_max     # 同回合一帧内最大允许降幅（超过=丢位误读）
+        self.turn_drop_action_min = turn_drop_action_min  # 回合减小帧行动值下限（重置必为高位）
         self.last = None
         self.drop_streak = 0
         self.reset_candidates = []                 # 突变候选帧（三帧确认）
@@ -451,8 +453,11 @@ class ValueFilter:
         if self.last is None:
             return True, ""
         lt, la = self.last
-        # 闸门3：回合数减小 = 合法重置（接受）
+        # 闸门3：回合数减小 = 合法重置（接受）；行动值必为高位（重置回100附近），
+        # 低位 = 丢位误读（如 0回合99 被读成 9）→ 拒绝，防误报链
         if turn < lt:
+            if action < self.turn_drop_action_min:
+                return False, "回合重置行动值低位(%d)" % action
             return True, ""
         if turn > lt:
             # 回合数增大：疑似新对局开始。与行动值突变一样走三帧确认
@@ -464,6 +469,10 @@ class ValueFilter:
                 return False, "回合增大待确认(%d/3)" % len(self.reset_candidates)
             seq = self.reset_candidates
             if all(seq[i][0] >= seq[i + 1][0] for i in range(len(seq) - 1)):
+                if seq[0][1] < self.turn_drop_action_min:
+                    # 新对局确认值低位（如 99 被读成 9 的持续丢位）→ 拒绝
+                    self.reset_candidates = []
+                    return False, "新对局确认值低位(%d)" % seq[0][1]
                 # 确认：新对局，基线 = 第一个增大帧
                 self.last = seq[0]
                 self.reset_candidates = []
@@ -495,6 +504,10 @@ class ValueFilter:
             return False, "突变待确认(%d/3)" % len(self.reset_candidates)
         seq = self.reset_candidates
         if all(seq[i][1] >= seq[i + 1][1] for i in range(len(seq) - 1)):
+            if seq[0][1] < self.turn_drop_action_min:
+                # 突变确认值低位（如 99 被读成 9 的持续丢位，3帧等值仍不可信）→ 拒绝
+                self.reset_candidates = []
+                return False, "突变确认值低位(%d)" % seq[0][1]
             # 确认：新回合重置，基线 = 第一个突变帧，本帧接受
             self.last = seq[0]
             self.reset_candidates = []
