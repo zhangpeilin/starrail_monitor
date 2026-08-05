@@ -396,7 +396,9 @@ class ValueFilter:
       3) 合法重置：行动值归零时回合数减 1、行动值重置回高位（回合数减小时接受）
       4) 同回合行动值突变：开关开启时，连续 3 帧突变且数值等值/递减、
          且发生在 行动值>0、回合数>0 时 → 允许（视为新回合重置），否则丢弃
-    丢弃帧不记录、不存档、不参与提醒判断。
+      5) 新对局：回合数增大时（旧对局结束、新对局从高位回合开始），
+         开关开启时同样三帧确认（连续 3 帧回合数等值/递减）→ 接受为新对局
+    丢弃帧不记录、不存档、不参与提醒判断。突变确认/新对局确认返回事件标记。
     """
 
     def __init__(self, max_turn=99, max_action=100, action_tolerance=5,
@@ -414,7 +416,9 @@ class ValueFilter:
         self.reset_candidates = []                 # 突变候选帧（三帧确认）
 
     def check(self, turn, action):
-        """返回 (通过?, 丢弃原因或'')"""
+        """返回 (通过?, 事件标记或丢弃原因)
+        通过时第二项为空；突变确认/新对局等特殊事件返回非空标记（用于日志高亮）。
+        """
         # 闸门1：数值范围
         if not (0 <= turn <= self.max_turn):
             return False, "回合数超范围(%d)" % turn
@@ -423,11 +427,25 @@ class ValueFilter:
         if self.last is None:
             return True, ""
         lt, la = self.last
-        # 闸门3：回合数只允许保持或减小（减小=合法重置）
+        # 闸门3：回合数减小 = 合法重置（接受）
         if turn < lt:
             return True, ""
         if turn > lt:
-            return False, "回合数增大(%d→%d)" % (lt, turn)
+            # 回合数增大：疑似新对局开始。与行动值突变一样走三帧确认
+            # （连续 3 帧回合数等值或递减才接受，防识别错误单帧误报新对局）
+            if not self.allow_reset:
+                return False, "回合数增大(%d→%d)" % (lt, turn)
+            self.reset_candidates.append((turn, action))
+            if len(self.reset_candidates) < 3:
+                return False, "回合增大待确认(%d/3)" % len(self.reset_candidates)
+            seq = self.reset_candidates
+            if all(seq[i][0] >= seq[i + 1][0] for i in range(len(seq) - 1)):
+                # 确认：新对局，基线 = 第一个增大帧
+                self.last = seq[0]
+                self.reset_candidates = []
+                return True, "新对局(回合增大确认)"
+            self.reset_candidates = []
+            return False, "回合增大无效(数值跳动)"
         # 闸门2：同一回合内行动值只递减（允许微小回弹容差）
         if action <= la + self.action_tolerance:
             self.reset_candidates = []
@@ -448,7 +466,7 @@ class ValueFilter:
             # 确认：新回合重置，基线 = 第一个突变帧，本帧接受
             self.last = seq[0]
             self.reset_candidates = []
-            return True, ""
+            return True, "突变确认"
         self.reset_candidates = []
         return False, "突变序列无效(数值跳动)"
 
@@ -965,15 +983,17 @@ class MonitorApp:
         row2.pack(fill="x", pady=(4, 0))
         self.cb_sound = tk.Checkbutton(row2, text="声音提醒", variable=self.var_sound)
         self.cb_sound.pack(side="left")
-        self.cb_fg = tk.Checkbutton(row2, text="仅游戏窗口在前台时监测(屏幕模式)",
-                                    variable=self.var_fg)
-        self.cb_fg.pack(side="left", padx=16)
         self.cb_log = tk.Checkbutton(row2, text="记录历史", variable=self.var_log)
         self.cb_log.pack(side="left", padx=16)
         self.cb_save = tk.Checkbutton(row2, text="保存识别画面", variable=self.var_save)
-        self.cb_save.pack(side="left")
+        self.cb_save.pack(side="left", padx=16)
         self.cb_reset = tk.Checkbutton(row2, text="允许行动值突变(3帧确认)", variable=self.var_reset)
         self.cb_reset.pack(side="left", padx=16)
+        row3 = tk.Frame(frm2)
+        row3.pack(fill="x", pady=(2, 0))
+        self.cb_fg = tk.Checkbutton(row3, text="仅游戏窗口在前台时监测(屏幕模式)",
+                                    variable=self.var_fg)
+        self.cb_fg.pack(side="left")
 
         frm3 = tk.Frame(root)
         frm3.pack(fill="x", **pad)
@@ -1002,13 +1022,19 @@ class MonitorApp:
         frm5.pack(fill="both", expand=True, **pad)
         self.txt_log = tk.Text(frm5, height=12, state="disabled", font=("Consolas", 9))
         self.txt_log.pack(fill="both", expand=True)
+        # 日志高亮：丢弃=红，突变确认/新对局=橙
+        self.txt_log.tag_configure("drop", foreground="#cc0000")
+        self.txt_log.tag_configure("event", foreground="#b06000")
 
         root.protocol("WM_DELETE_WINDOW", self.on_close)
 
-    def log(self, msg):
+    def log(self, msg, tag=None):
         ts = datetime.now().strftime("%H:%M:%S")
         self.txt_log.configure(state="normal")
-        self.txt_log.insert("end", "[%s] %s\n" % (ts, msg))
+        if tag:
+            self.txt_log.insert("end", "[%s] %s\n" % (ts, msg), tag)
+        else:
+            self.txt_log.insert("end", "[%s] %s\n" % (ts, msg))
         self.txt_log.see("end")
         self.txt_log.configure(state="disabled")
 
@@ -1288,6 +1314,9 @@ class MonitorApp:
                                         "info": "t%d/a%d" % (turn, action)})
                     continue
                 self.filter.accept(turn, action)
+                if drop_reason:
+                    # 特殊事件（突变确认/新对局）：在说明与日志中标记
+                    info = "%s %s" % (drop_reason, info) if info else drop_reason
                 hit = (turn == self.cfg["turn_threshold"]
                        and action < self.cfg["action_threshold"])
                 alert_flag = False
@@ -1372,6 +1401,11 @@ class MonitorApp:
                                                % (msg["turn"], msg["action"]))
                 if msg.get("info") and msg.get("status") == "未识别到数字":
                     self.log("未识别: %s" % msg["info"])
+                elif msg.get("status", "").startswith("丢弃"):
+                    self.log("%s (%s)" % (msg["status"], msg.get("info", "")),
+                             tag="drop")
+                elif "突变确认" in msg.get("info", "") or "新对局" in msg.get("info", ""):
+                    self.log("事件: %s" % msg["info"], tag="event")
         except queue.Empty:
             pass
         self.root.after(100, self._poll_queue)
