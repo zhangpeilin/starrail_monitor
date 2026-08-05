@@ -220,7 +220,8 @@ def test_drop_low_value():
     ok("低位小降接受", r == (True, ""))
 
 
-# 19. 位数骤降：两位数→一位数且降幅>5（丢十位）拒绝，即使降幅<20
+# 19. 位数骤降：两位数→一位数且降幅>5（丢十位）拒绝，即使降幅<20；
+#    三位→两位（100→90 回合重置后的正常快速下降）不拦
 def test_digit_drop():
     vf = ValueFilter(max_turn=99, max_action=100)
     vf.accept(1, 15)
@@ -232,6 +233,11 @@ def test_digit_drop():
     r2 = vf2.check(1, 95)
     ok("三位→两位小幅下降接受(100→95)", r2 == (True, ""))
     vf2.accept(1, 95)
+    vf4 = ValueFilter(max_turn=99, max_action=100)
+    vf4.accept(0, 100)
+    r4 = vf4.check(0, 90)
+    ok("三位→两位快速下降接受(100→90)", r4 == (True, ""))
+    vf4.accept(0, 90)
     vf3 = ValueFilter(max_turn=99, max_action=100)
     vf3.accept(1, 99)
     r3 = vf3.check(1, 9)
@@ -239,12 +245,13 @@ def test_digit_drop():
     vf3.reject()
 
 
-# 20. 未识别帧计数兜底：15 帧拒绝后基线重置，高位值可接受
+# 20. 未识别帧计数兜底：15 帧拒绝后基线重置，高位值可接受；重置时间戳更新
 def test_reject_streak_recovery():
     vf = ValueFilter(max_turn=99, max_action=100, reset_after=15)
     vf.accept(0, 6)
     for _ in range(15):
         vf.reject()
+    ok("兜底重置记录时间戳", vf.last is None and vf.reset_ts > 0)
     r = vf.check(0, 62)
     ok("兜底重置后高位值首帧接受", r == (True, ""))
 

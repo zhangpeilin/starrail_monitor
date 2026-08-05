@@ -437,6 +437,7 @@ class ValueFilter:
         self.last = None
         self.drop_streak = 0
         self.reset_candidates = []                 # 突变候选帧（三帧确认）
+        self.reset_ts = 0.0                        # 基线兜底重置时间（重置后提醒冷却用）
 
     def check(self, turn, action):
         """返回 (通过?, 事件标记或丢弃原因)
@@ -475,8 +476,9 @@ class ValueFilter:
                 # 向下突变：同回合内一帧降幅过大（如 99 被误读成 9 的丢位）
                 # → 拒绝，基线保持不变，下一帧正确值仍可正常接受
                 return False, "行动值骤降(%d→%d)" % (la, action)
-            if len(str(la)) > len(str(action)) and action < la - 5:
-                # 位数骤降：两位数→一位数（丢十位）即使降幅 <20 也拒绝
+            if len(str(la)) == 2 and len(str(action)) == 1 and action < la - 5:
+                # 位数骤降：两位数→一位数（十位消失的丢位，如 13→3）
+                # 即使降幅 <20 也拒绝；三位→两位（100→90 正常快速下降）不拦
                 return False, "行动值骤降(%d→%d)" % (la, action)
             self.reset_candidates = []
             return True, ""
@@ -513,6 +515,7 @@ class ValueFilter:
             self.last = None
             self.reset_candidates = []
             self.drop_streak = 0
+            self.reset_ts = time.time()
 
     def reset(self):
         self.last = None
@@ -1401,7 +1404,8 @@ class MonitorApp:
                     # 特殊事件（突变确认/新对局/骤降确认）：在说明与日志中标记
                     info = "%s %s" % (drop_reason, info) if info else drop_reason
                 hit = (turn == self.cfg["turn_threshold"]
-                       and action < self.cfg["action_threshold"])
+                       and action < self.cfg["action_threshold"]
+                       and time.time() - self.filter.reset_ts > 10)
                 alert_flag = False
                 if hit:
                     self.consecutive += 1
