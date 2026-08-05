@@ -322,10 +322,12 @@ class Extractor:
         if hourglass is not None:
             hy0, hy1 = hourglass[1], hourglass[3]
             info.append("沙漏区域(%d,%d)-(%d,%d)" % hourglass[:4])
-            # 行动值：沙漏右侧、垂直与沙漏有交叠的白色组件；
+            # 行动值：沙漏右侧、y 中心与沙漏对齐的白色组件（防把上下方
+            # 其他白色元素如角色立绘/发光卷进区域）；
             # 按 x 间距聚类取最左簇（排除右侧无关元素如 2/6 的发光描边）
+            hyc = (hy0 + hy1) / 2.0
             acts_all = [c for c in wc if c[0] > hourglass[2]
-                        and c[3] > hy0 - 15 and c[1] < hy1 + 15]
+                        and abs((c[1] + c[3]) / 2.0 - hyc) <= 15]
             acts_all.sort(key=lambda c: c[0])
             clusters = []
             for c in acts_all:
@@ -422,7 +424,7 @@ class ValueFilter:
     """
 
     def __init__(self, max_turn=99, max_action=100, action_tolerance=5,
-                 reset_after=30, allow_reset=True, reset_turn_min=1,
+                 reset_after=15, allow_reset=True, reset_turn_min=1,
                  reset_action_min=1, action_drop_max=20):
         self.max_turn = max_turn
         self.max_action = max_action
@@ -472,6 +474,9 @@ class ValueFilter:
             if action < la - self.action_drop_max:
                 # 向下突变：同回合内一帧降幅过大（如 99 被误读成 9 的丢位）
                 # → 拒绝，基线保持不变，下一帧正确值仍可正常接受
+                return False, "行动值骤降(%d→%d)" % (la, action)
+            if len(str(la)) > len(str(action)) and action < la - 5:
+                # 位数骤降：两位数→一位数（丢十位）即使降幅 <20 也拒绝
                 return False, "行动值骤降(%d→%d)" % (la, action)
             self.reset_candidates = []
             return True, ""
@@ -1345,6 +1350,8 @@ class MonitorApp:
                 turn, action, info, col_img = self.recognize(use_persistent=True)
                 if turn is None or action is None:
                     fail_streak += 1
+                    # 未识别帧也计入丢弃计数（加速长期失败时的基线兜底重置）
+                    self.filter.reject()
                     if fail_streak >= 3 and self.capture is not None:
                         # 捕获器可能已失效（如游戏窗口重建），重建一次
                         try:
