@@ -818,7 +818,7 @@ DEFAULT_CONFIG = {
     "reset_turn_min": 1,             # 突变允许的回合数下限（回合数>0 才允许）
     "reset_action_min": 1,           # 突变允许的行动值下限（行动值>0 才允许）
     "action_drop_max": 20,           # 同回合一帧内最大允许降幅（超过=丢位误读丢弃）
-    "rapid_recheck": True,           # RapidOCR 低频复核（突变/骤降帧二次确认）
+    "rapid_recheck": False,          # RapidOCR 复核默认关闭（本地推理与游戏抢CPU会卡，需手动开启）
     "rapid_baseline_s": 6,           # 周期基线校准间隔（秒，RapidOCR 复核）
 }
 
