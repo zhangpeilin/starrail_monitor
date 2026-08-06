@@ -1,11 +1,12 @@
 @echo off
 REM Self-elevate to match the game's admin privileges (required for window capture)
-net session >/dev/null 2>&1
+net session >nul 2>&1
 if %errorlevel% neq 0 (
     echo Requesting administrator privileges...
     powershell -NoProfile -Command "Start-Process -FilePath '%~f0' -Verb RunAs"
     exit /b
 )
+echo Running as administrator.
 setlocal
 cd /d "%~dp0"
 title StarRail Turn/Action Monitor
