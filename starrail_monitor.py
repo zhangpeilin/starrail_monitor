@@ -1148,11 +1148,10 @@ class MonitorApp:
         h = rect.bottom - rect.top
         if w < 300 or h < 200:
             self.log("警告: 游戏窗口过小(%dx%d)，可能被最小化或移出屏幕，请恢复游戏窗口" % (w, h))
-        # 探测 PrintWindow
+        # 探测 PrintWindow（成功不记日志，避免识别失败重建捕获器时刷屏）
         try:
             img = printwindow_capture(hwnd)
             if img is not None and not is_black(img):
-                self.log("窗口直捕(PrintWindow)可用")
                 return PrintWindowCapture(hwnd)
         except Exception:
             pass
@@ -1533,7 +1532,10 @@ class MonitorApp:
                     self.lbl_values.configure(text="回合数: %s  行动值: %s"
                                                % (msg["turn"], msg["action"]))
                 if msg.get("info") and msg.get("status") == "未识别到数字":
-                    self.log("未识别: %s" % msg["info"])
+                    # 精简滚动日志：未定位到倒计时条是高频噪音（条浮动/遮挡常态），隐藏；
+                    # 保留有条但提取失败/整区域识别异常的诊断信息
+                    if not msg["info"].startswith("未定位到倒计时条"):
+                        self.log("未识别: %s" % msg["info"])
                 elif msg.get("status", "").startswith("丢弃"):
                     self.log("%s (%s)" % (msg["status"], msg.get("info", "")),
                              tag="drop")
