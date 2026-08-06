@@ -267,9 +267,42 @@ def _replay_accuracy(frames, matcher, ocr, sample=1):
     return ok_n, total
 
 
+def _digits_images():
+    """加载磁盘模板每数字的变体 PIL 图（用于图形化对比）"""
+    from PIL import Image as _I
+    imgs = {}
+    for d in range(10):
+        lst = []
+        i = 0
+        while True:
+            p = os.path.join(DIGITS_DIR, "%d_%d.png" % (d, i))
+            if not os.path.isfile(p):
+                break
+            try:
+                lst.append(_I.open(p).convert("L"))
+            except Exception:
+                pass
+            i += 1
+        if not lst:
+            p = os.path.join(DIGITS_DIR, "%d.png" % d)
+            if os.path.isfile(p):
+                try:
+                    lst.append(_I.open(p).convert("L"))
+                except Exception:
+                    pass
+        imgs[d] = lst
+    return imgs
+
+
+def _arrs_images(arrs):
+    """numpy 数组列表 → PIL 图列表"""
+    from PIL import Image as _I
+    return [_I.fromarray(a, "L") for a in arrs]
+
+
 def learn_once(script_dir=None, force=False):
-    """执行一轮模板学习。返回结果描述或 None（无需学习）。
-    force=True 时忽略 MIN_NEW 阈值（全量重学，用于调试）"""
+    """执行一轮模板学习。返回结构化结果 dict；无需学习时返回 None。
+    force=True 时全量重学（清空样本池重新收集，用于手动执行）"""
     global pool_cache
     base = script_dir or os.path.dirname(os.path.abspath(__file__))
     frames_dir = os.path.join(base, "logs", "frames")
@@ -288,6 +321,10 @@ def learn_once(script_dir=None, force=False):
         return None
     if force:
         new_frames = [os.path.join(frames_dir, f) for f in all_frames]
+        for d in range(10):
+            dd = os.path.join(SAMPLE_DIR, str(d))
+            if os.path.isdir(dd):
+                shutil.rmtree(dd)
 
     ocr = OcrEngine()
     old_matcher = TemplateMatcher()
@@ -311,9 +348,15 @@ def learn_once(script_dir=None, force=False):
 
     variants = _pick_variants(pool_cache)
     if len(variants) < 10:
-        return "样本不足：%d/10 个数字有样本" % len(variants)
+        return {"message": "样本不足：%d/10 个数字有样本" % len(variants),
+                "applied": False, "acc_old": None, "acc_new": None,
+                "old_total": 0, "new_total": 0,
+                "old_images": _digits_images(),
+                "new_images": {d: _arrs_images(variants[d])
+                               for d in sorted(variants)},
+                "samples": {d: len(pool_cache[d]) for d in range(10)}}
 
-    # 回放门禁：新旧模板对比（接受帧全量，采样 1/2 加速）
+    # 回放门禁：新旧模板对比（接受帧全量）
     test_frames = [os.path.join(frames_dir, f) for f in all_frames]
     old_ok, old_total = _replay_accuracy(test_frames, old_matcher, ocr, sample=1)
     tmp_dir = tempfile.mkdtemp(prefix="tmpl_")
@@ -346,9 +389,81 @@ def learn_once(script_dir=None, force=False):
     state["acc_new"] = round(new_acc, 4)
     state["applied"] = applied
     _save_state(state)
-    result = ("模板学习生效：新模板识别率 %.1f%% (旧 %.1f%%)，样本+%d"
-              % (new_acc * 100, old_acc * 100, added)
-              if applied else
-              "模板学习回滚：新模板识别率 %.1f%% < 旧 %.1f%%，保留旧模板（样本+%d）"
-              % (new_acc * 100, old_acc * 100, added))
-    return result
+    message = ("模板学习生效：新模板识别率 %.1f%% (旧 %.1f%%)，样本+%d"
+               % (new_acc * 100, old_acc * 100, added)
+               if applied else
+               "模板学习回滚：新模板识别率 %.1f%% < 旧 %.1f%%，保留旧模板（样本+%d）"
+               % (new_acc * 100, old_acc * 100, added))
+    return {"message": message, "applied": applied,
+            "acc_old": round(old_acc, 4), "acc_new": round(new_acc, 4),
+            "old_total": old_total, "new_total": new_total,
+            "old_images": _digits_images(),
+            "new_images": {d: _arrs_images(variants[d])
+                           for d in sorted(variants)},
+            "samples": {d: len(pool_cache[d]) for d in range(10)}}
+
+
+def show_report(result):
+    """图形化对比报告：新旧模板图片并排 + 识别率对比"""
+    import tkinter as tk
+    from PIL import ImageTk
+
+    root = tk.Tk()
+    root.title("模板学习报告")
+    acc_old = result.get("acc_old")
+    acc_new = result.get("acc_new")
+    if acc_old is not None:
+        head = ("%s\n旧模板识别率 %.1f%%（%d帧）  新模板识别率 %.1f%%（%d帧）"
+                % (result["message"], acc_old * 100, result.get("old_total", 0),
+                   acc_new * 100, result.get("new_total", 0)))
+    else:
+        head = result["message"]
+    tk.Label(root, text=head, font=("Microsoft YaHei UI", 12),
+             fg="#b00020" if not result.get("applied") else "#006400",
+             justify="left").pack(pady=10, padx=12)
+
+    def row_images(title, images_map, color):
+        frame = tk.Frame(root)
+        frame.pack(fill="x", padx=12, pady=4)
+        tk.Label(frame, text=title, font=("Microsoft YaHei UI", 10, "bold"),
+                 fg=color).pack(anchor="w")
+        cells = tk.Frame(frame)
+        cells.pack(anchor="w", pady=2)
+        for d in range(10):
+            cell = tk.Frame(cells, relief="groove", bd=1)
+            cell.pack(side="left", padx=2)
+            imgs = images_map.get(d, [])
+            tk.Label(cell, text=str(d), font=("Consolas", 9)).pack()
+            inner = tk.Frame(cell)
+            inner.pack()
+            if not imgs:
+                tk.Label(inner, text="无", width=4, height=2).pack()
+            for im in imgs:
+                big = im.resize((im.width * 8, im.height * 8),
+                                Image.NEAREST)
+                tk.Label(inner, image=ImageTk.PhotoImage(big)).pack(
+                    side="left", padx=1)
+                # 保持引用防 GC
+                cell._imgs = getattr(cell, "_imgs", []) + [ImageTk.PhotoImage(big)]
+        samples = result.get("samples", {})
+        tk.Label(frame, text="样本数: %s" % {d: samples.get(d, 0)
+                                             for d in range(10)},
+                 font=("Consolas", 8), fg="gray").pack(anchor="w")
+
+    row_images("旧模板（当前生效）", result.get("old_images", {}), "#00008b")
+    row_images("新模板（候选）", result.get("new_images", {}), "#006400")
+
+    tk.Button(root, text="关闭", command=root.destroy,
+              font=("Microsoft YaHei UI", 11), width=10).pack(pady=10)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    print("开始模板学习（全量收集 + 回放对比，约 5-8 分钟）...")
+    print("提示：期间请勿关闭窗口；日志帧文件夹在滚动时对比会自动重跑")
+    result = learn_once(force=True)
+    if result is None:
+        print("无需学习（无新增接受帧）")
+        sys.exit(0)
+    print(result["message"])
+    show_report(result)

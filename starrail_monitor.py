@@ -1014,11 +1014,6 @@ class MonitorApp:
         self.running = False
         self._build_ui()
         self.root.after(100, self._poll_queue)
-        # 启动时后台执行一轮模板学习（增量吸收+回放门禁，只升不降）
-        try:
-            threading.Thread(target=self._background_learn, daemon=True).start()
-        except Exception:
-            pass
         if self.ocr.ok():
             self.log("OCR 引擎: %s (%s)" % (self.ocr.engine_name(),
                                              self.ocr.tess_path or "系统内置"))
@@ -1511,17 +1506,6 @@ class MonitorApp:
                 self.msg_queue.put({"status": "异常: %s" % e})
                 self.consecutive = 0
             time.sleep(max(0.05, interval / 1000.0 - (time.time() - t0)))
-
-    # ---------------- 模板学习（后台） ----------------
-    def _background_learn(self):
-        """启动时后台执行一轮模板学习（增量吸收+回放门禁，只升不降）"""
-        try:
-            from template_learn import learn_once
-            result = learn_once()
-            if result:
-                self.msg_queue.put({"status": "模板学习", "info": result})
-        except Exception:
-            pass
 
     # ---------------- 提醒弹窗 ----------------
     def show_alert(self, turn, action):

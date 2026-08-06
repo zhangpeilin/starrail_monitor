@@ -45,7 +45,8 @@
 |---|---|
 | `start.bat` | 双击启动（自提权，首次自动装依赖） |
 | `starrail_monitor.py` | 主程序（GUI + 识别 + 校验 + 提醒） |
-| `template_matcher.py` | OpenCV 模板匹配识别器 |
+| `template_matcher.py` | OpenCV 模板匹配识别器（支持多数字变体模板） |
+| `template_learn.py` | 模板自学习（手动执行：`venv\Scripts\python.exe template_learn.py`；增量吸收存档样本+回放对比门禁，图形化展示新旧模板与识别率，只升不降） |
 | `rapid_recheck.py` | RapidOCR 低频复核（可选，默认关闭） |
 | `build_templates.py` | 从存档帧重新采集 0-9 数字模板（`venv\Scripts\python.exe build_templates.py`） |
 | `templates/digits/` | 0-9 数字模板文件（识别必需） |
