@@ -990,6 +990,7 @@ class MonitorApp:
         self.alert_win = None
         self.alert_beep = False
         self.last_dismiss = 0.0
+        self.silent_round = False   # 本局静默（点"本局不再提醒"后置真，新对局自动恢复）
         self.consecutive = 0
         self.running = False
         self._build_ui()
@@ -1433,9 +1434,15 @@ class MonitorApp:
                 if drop_reason:
                     # 特殊事件（突变确认/新对局/骤降确认）：在说明与日志中标记
                     info = "%s %s" % (drop_reason, info) if info else drop_reason
+                # 本局静默自动恢复：新对局开始（回合回到 1）或行动值重置回高位
+                if self.silent_round and (turn >= 1 or action >= 50):
+                    self.silent_round = False
+                    self.msg_queue.put({"status": "提醒恢复",
+                                        "info": "新对局开始，本局提醒已恢复"})
                 hit = (turn == self.cfg["turn_threshold"]
                        and action < self.cfg["action_threshold"]
-                       and time.time() - self.filter.reset_ts > 10)
+                       and time.time() - self.filter.reset_ts > 10
+                       and not self.silent_round)
                 alert_flag = False
                 if hit:
                     self.consecutive += 1
@@ -1500,10 +1507,24 @@ class MonitorApp:
             self.alert_beep = False
             self.alert_win = None
             win.destroy()
-            self.log("提醒已关闭")
+            self.log("提醒已关闭，下次继续提醒")
 
-        tk.Button(win, text="知道了", command=dismiss, font=("Microsoft YaHei UI", 12),
-                  width=12, height=1, bg="white", fg="#b00020").pack(pady=(18, 0))
+        def dismiss_silent():
+            self.last_dismiss = time.time()
+            self.alert_beep = False
+            self.alert_win = None
+            self.silent_round = True
+            win.destroy()
+            self.log("本局不再提醒（新对局开始时自动恢复）")
+
+        btn_row = tk.Frame(win, bg="#b00020")
+        btn_row.pack(pady=(18, 0))
+        tk.Button(btn_row, text="本局不再提醒", command=dismiss_silent,
+                  font=("Microsoft YaHei UI", 12), width=14, height=1,
+                  bg="white", fg="#b00020").pack(side="left", padx=10)
+        tk.Button(btn_row, text="下次继续提醒", command=dismiss,
+                  font=("Microsoft YaHei UI", 12), width=14, height=1,
+                  bg="#ffe6e6", fg="#b00020").pack(side="left", padx=10)
 
         self.alert_win = win
         if self.cfg["sound"]:
@@ -1541,7 +1562,8 @@ class MonitorApp:
                              tag="drop")
                 elif ("突变确认" in msg.get("info", "") or "新对局" in msg.get("info", "")
                       or "骤降确认" in msg.get("info", "")
-                      or "基线校准" in msg.get("info", "")):
+                      or "基线校准" in msg.get("info", "")
+                      or "提醒恢复" in msg.get("info", "")):
                     self.log("事件: %s" % msg["info"], tag="event")
         except queue.Empty:
             pass
