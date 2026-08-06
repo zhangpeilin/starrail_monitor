@@ -475,12 +475,14 @@ class ValueFilter:
                 return False, "回合增大待确认(%d/3)" % len(self.reset_candidates)
             seq = self.reset_candidates
             if all(seq[i][0] >= seq[i + 1][0] for i in range(len(seq) - 1)):
-                if seq[0][1] < self.turn_drop_action_min:
+                # 确认值取 3 帧最大行动值（防首帧恰好是丢位值：如 7/74/6 → 取 74）
+                best = max(s[1] for s in seq)
+                if best < self.turn_drop_action_min:
                     # 新对局确认值低位（如 99 被读成 9 的持续丢位）→ 拒绝
                     self.reset_candidates = []
-                    return False, "新对局确认值低位(%d)" % seq[0][1]
-                # 确认：新对局，基线 = 第一个增大帧
-                self.last = seq[0]
+                    return False, "新对局确认值低位(%d)" % best
+                # 确认：新对局，基线 = 首个增大帧的回合 + 最大行动值
+                self.last = (seq[0][0], best)
                 self.reset_candidates = []
                 return True, "新对局(回合增大确认)"
             self.reset_candidates = []
@@ -506,18 +508,20 @@ class ValueFilter:
             # 不满足突变允许条件（回合数>0、行动值>0）
             self.reset_candidates = []
             return False, "突变不允许(回合%d/行动值%d)" % (turn, action)
-        # 三帧确认：连续 3 帧突变且数值等值或递减 → 视为新回合重置
+        # 三帧确认：连续 3 帧突变，数值等值/递减或每帧回弹 ≤2（识别抖动容差）
+        # → 视为新回合重置；确认值取 3 帧最大行动值（抗丢位帧）
         self.reset_candidates.append((turn, action))
         if len(self.reset_candidates) < 3:
             return False, "突变待确认(%d/3)" % len(self.reset_candidates)
         seq = self.reset_candidates
-        if all(seq[i][1] >= seq[i + 1][1] for i in range(len(seq) - 1)):
-            if seq[0][1] < self.turn_drop_action_min:
+        if all(seq[i][1] >= seq[i + 1][1] - 2 for i in range(len(seq) - 1)):
+            best = max(s[1] for s in seq)
+            if best < self.turn_drop_action_min:
                 # 突变确认值低位（如 99 被读成 9 的持续丢位，3帧等值仍不可信）→ 拒绝
                 self.reset_candidates = []
-                return False, "突变确认值低位(%d)" % seq[0][1]
-            # 确认：新回合重置，基线 = 第一个突变帧，本帧接受
-            self.last = seq[0]
+                return False, "突变确认值低位(%d)" % best
+            # 确认：新回合重置，基线 = 首个突变帧的回合 + 最大行动值
+            self.last = (seq[0][0], best)
             self.reset_candidates = []
             return True, "突变确认"
         self.reset_candidates = []

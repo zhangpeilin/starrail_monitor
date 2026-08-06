@@ -430,6 +430,42 @@ def test_today_scenario():
     ok("今日场景：86→54→49→48→46 全部接受", ok1 and ok2 and ok3 and ok4)
 
 
+# 33. 突变确认抖动容差：96,94,95（每帧回弹≤2）应确认，基线取最大96
+def test_mutation_jitter_confirm():
+    vf = ValueFilter(max_turn=99, max_action=100)
+    vf.accept(1, 5)
+    r1 = vf.check(1, 96)
+    r2 = vf.check(1, 94)
+    r3 = vf.check(1, 95)
+    ok("突变抖动确认(96,94,95)", r1[0] is False and r2[0] is False
+       and r3 == (True, "突变确认") and vf.last == (1, 96))
+    vf.accept(1, 96)
+
+
+# 34. 回合增大确认值取最大（13:12 案例：7/74/6 → 取74，首帧丢位不影响）
+def test_new_game_max_confirm():
+    vf = ValueFilter(max_turn=99, max_action=100)
+    vf.accept(0, 4)
+    r1 = vf.check(1, 7)
+    r2 = vf.check(1, 74)
+    r3 = vf.check(1, 6)
+    ok("回合增大确认取最大(7,74,6→74)", r1[0] is False and r2[0] is False
+       and r3 == (True, "新对局(回合增大确认)") and vf.last == (1, 74))
+    vf.accept(1, 74)
+
+
+# 35. 跳变仍无效：40,95,95（首帧低位混入，帧间跳变>2）→ 不确认
+def test_mutation_jump_invalid():
+    vf = ValueFilter(max_turn=99, max_action=100)
+    vf.accept(1, 5)
+    r1 = vf.check(1, 40)
+    r2 = vf.check(1, 95)
+    r3 = vf.check(1, 95)
+    ok("跳变序列无效(40,95,95)", r1[0] is False and r2[0] is False
+       and r3[0] is False and "无效" in r3[1])
+    vf.reject()
+
+
 def main():
     test_first_frame()
     test_decrease()
@@ -463,6 +499,9 @@ def main():
     test_same_digit_drop_accept()
     test_digit_drop_to_unit()
     test_today_scenario()
+    test_mutation_jitter_confirm()
+    test_new_game_max_confirm()
+    test_mutation_jump_invalid()
     print("----")
     print("%d 项通过" % PASS)
     if FAIL:
