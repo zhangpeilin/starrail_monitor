@@ -924,6 +924,24 @@ class Recorder:
                 except Exception:
                     pass
 
+    def save_drop(self, turn, action, reason, col_img):
+        """保存被丢弃帧的画面（供事后排查丢弃是否正确），受 max_frames 上限约束"""
+        if col_img is None:
+            return
+        with self._lock:
+            try:
+                now = datetime.now()
+                tag = "".join(ch for ch in reason[:8] if ch.isalnum())
+                name = "frame_%s_t%d_a%d_drop_%s.png" % (
+                    now.strftime("%Y%m%d_%H%M%S_%f")[:-3], turn, action, tag)
+                col_img.save(os.path.join(self.frames_dir, name))
+            except Exception:
+                pass
+            # 丢弃帧不经过 record_count，自行定期清理超限帧
+            self._drop_count = getattr(self, "_drop_count", 0) + 1
+            if self._drop_count % 20 == 0:
+                self.prune()
+
     def prune(self):
         """删除超出上限的最旧帧文件"""
         try:
@@ -1415,6 +1433,7 @@ class MonitorApp:
                         elif ra is not None:
                             # 复核不一致（如骤降帧 RapidOCR 读出高位）→ 确认丢位
                             self.filter.reject()
+                            self.recorder.save_drop(turn, action, drop_reason, col_img)
                             self.msg_queue.put({
                                 "status": "丢弃(骤降Rapid复核=%d)" % ra,
                                 "info": "t%d/a%d" % (turn, action)})
@@ -1427,6 +1446,8 @@ class MonitorApp:
                         if (drop_reason.startswith("突变不允许")
                                 or drop_reason.startswith("突变序列无效")):
                             self.filter.reject()
+                        # 被丢弃帧存档（文件名带原因标记，供事后排查丢弃是否正确）
+                        self.recorder.save_drop(turn, action, drop_reason, col_img)
                         self.msg_queue.put({"status": "丢弃(%s)" % drop_reason,
                                             "info": "t%d/a%d" % (turn, action)})
                         continue
