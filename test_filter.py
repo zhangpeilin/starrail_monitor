@@ -376,6 +376,60 @@ def test_zero_rebound_scenario():
     vf.accept(1, 89)
 
 
+# 30. 同位数骤降接受（游戏真实机制：86→54，两位数→两位数）
+def test_same_digit_drop_accept():
+    vf = ValueFilter(max_turn=99, max_action=100)
+    vf.accept(0, 86)
+    r = vf.check(0, 54)
+    ok("同位数骤降接受(86→54)", r == (True, ""))
+    vf.accept(0, 54)
+    r2 = vf.check(0, 49)
+    ok("骤降后继续递减接受(54→49)", r2 == (True, ""))
+    vf.accept(0, 49)
+    # 误读自愈：86→56 误读接受后，真实 54 容差内接受
+    vf2 = ValueFilter(max_turn=99, max_action=100)
+    vf2.accept(0, 86)
+    r3 = vf2.check(0, 56)
+    ok("同位数骤降误读接受(86→56)", r3 == (True, ""))
+    vf2.accept(0, 56)
+    r4 = vf2.check(0, 54)
+    ok("误读后真实值容差自愈(56→54)", r4 == (True, ""))
+
+
+# 31. 多位数→个位数丢位拒绝（99→9 / 100→9 / 86→8）
+def test_digit_drop_to_unit():
+    vf = ValueFilter(max_turn=99, max_action=100)
+    vf.accept(0, 86)
+    r = vf.check(0, 8)
+    ok("丢位拒绝(86→8)", r[0] is False and "骤降" in r[1])
+    vf.reject()
+    vf2 = ValueFilter(max_turn=99, max_action=100)
+    vf2.accept(0, 100)
+    r2 = vf2.check(0, 9)
+    ok("丢位拒绝(100→9)", r2[0] is False and "骤降" in r2[1])
+    vf2.reject()
+    vf3 = ValueFilter(max_turn=99, max_action=100)
+    vf3.accept(0, 99)
+    r3 = vf3.check(0, 9)
+    ok("丢位拒绝(99→9)", r3[0] is False and "骤降" in r3[1])
+    vf3.reject()
+
+
+# 32. 今日场景还原：0回合86 → 真实骤降54/49/48/46 全接受
+def test_today_scenario():
+    vf = ValueFilter(max_turn=99, max_action=100)
+    vf.accept(0, 86)
+    ok1 = vf.check(0, 54) == (True, "")
+    vf.accept(0, 54)
+    ok2 = vf.check(0, 49) == (True, "")
+    vf.accept(0, 49)
+    ok3 = vf.check(0, 48) == (True, "")
+    vf.accept(0, 48)
+    ok4 = vf.check(0, 46) == (True, "")
+    vf.accept(0, 46)
+    ok("今日场景：86→54→49→48→46 全部接受", ok1 and ok2 and ok3 and ok4)
+
+
 def main():
     test_first_frame()
     test_decrease()
@@ -406,6 +460,9 @@ def main():
     test_reset_cooldown_expired()
     test_zero_rebound()
     test_zero_rebound_scenario()
+    test_same_digit_drop_accept()
+    test_digit_drop_to_unit()
+    test_today_scenario()
     print("----")
     print("%d 项通过" % PASS)
     if FAIL:

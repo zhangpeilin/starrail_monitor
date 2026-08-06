@@ -434,7 +434,7 @@ class ValueFilter:
         self.allow_reset = allow_reset             # 行动值突变允许开关
         self.reset_turn_min = reset_turn_min       # 突变允许的回合数下限（回合数>0 才允许）
         self.reset_action_min = reset_action_min   # 突变允许的行动值下限（行动值>0 才允许）
-        self.action_drop_max = action_drop_max     # 同回合一帧内最大允许降幅（超过=丢位误读）
+        self.action_drop_max = action_drop_max     # 历史参数（保留兼容）：骤降判定已改为「多位数→个位数」检查
         self.turn_drop_action_min = turn_drop_action_min  # 回合减小帧行动值下限（重置必为高位）
         self.last = None
         self.drop_streak = 0
@@ -487,13 +487,11 @@ class ValueFilter:
             return False, "回合增大无效(数值跳动)"
         # 闸门2：同一回合内行动值只递减（允许微小回弹容差）
         if action <= la + self.action_tolerance:
-            if action < la - self.action_drop_max:
-                # 向下突变：同回合内一帧降幅过大（如 99 被误读成 9 的丢位）
-                # → 拒绝，基线保持不变，下一帧正确值仍可正常接受
-                return False, "行动值骤降(%d→%d)" % (la, action)
-            if len(str(la)) == 2 and len(str(action)) == 1 and action < la - 5:
-                # 位数骤降：两位数→一位数（十位消失的丢位，如 13→3）
-                # 即使降幅 <20 也拒绝；三位→两位（100→90 正常快速下降）不拦
+            if la >= 10 and action < 10 and action < la - 5:
+                # 丢位骤降：从多位数掉到个位数（十位消失，如 99→9/86→8），
+                # 拒绝且基线保持，下一帧正确值仍可正常接受；
+                # 同位数骤降（86→54）是游戏真实机制/识别失败后的正常下降，
+                # 且误读也能被后续容差自愈（54 相对误读值回弹在容差内）→ 不拦
                 return False, "行动值骤降(%d→%d)" % (la, action)
             if la == 0 and action > 0:
                 # 归零回弹：行动值归零=回合切换/战斗结束（机制上同回合不回弹），
