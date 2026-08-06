@@ -16,6 +16,7 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 
 import cv2
 import numpy as np
@@ -378,34 +379,65 @@ def learn_once(script_dir=None, force=False):
 
     old_acc = old_ok / old_total if old_total else 0
     new_acc = new_ok / new_total if new_total else 0
-    applied = new_total > 0 and new_acc >= old_acc
-    if applied:
-        _write_digits(variants)
-    # 更新状态
+    better = new_total > 0 and new_acc >= old_acc
+    # 不自动生效：是否启用由用户在报告窗口确认（确认时备份旧模板，可随时回退）
     state["last_ts"] = _frame_ts(os.path.basename(all_frames[-1])) if all_frames \
         else state.get("last_ts", "")
     state["learn_count"] = state.get("learn_count", 0) + 1
     state["acc_old"] = round(old_acc, 4)
     state["acc_new"] = round(new_acc, 4)
-    state["applied"] = applied
+    state["applied"] = False
     _save_state(state)
-    message = ("模板学习生效：新模板识别率 %.1f%% (旧 %.1f%%)，样本+%d"
-               % (new_acc * 100, old_acc * 100, added)
-               if applied else
-               "模板学习回滚：新模板识别率 %.1f%% < 旧 %.1f%%，保留旧模板（样本+%d）"
-               % (new_acc * 100, old_acc * 100, added))
-    return {"message": message, "applied": applied,
+    if better:
+        message = ("新模板识别率 %.1f%% ≥ 旧模板 %.1f%%（%d帧），可启用（需确认）"
+                   % (new_acc * 100, old_acc * 100, new_total))
+    else:
+        message = ("新模板识别率 %.1f%% < 旧模板 %.1f%%（%d帧），不建议启用"
+                   % (new_acc * 100, old_acc * 100, new_total))
+    return {"message": message, "applied": False, "better": better,
             "acc_old": round(old_acc, 4), "acc_new": round(new_acc, 4),
             "old_total": old_total, "new_total": new_total,
             "old_images": _digits_images(),
             "new_images": {d: _arrs_images(variants[d])
                            for d in sorted(variants)},
-            "samples": {d: len(pool_cache[d]) for d in range(10)}}
+            "samples": {d: len(pool_cache[d]) for d in range(10)},
+            "_variants": variants}
+
+
+def _backup_digits():
+    """备份当前生效模板到 templates/backup_时间戳/，返回备份目录路径"""
+    ts = time.strftime("%Y%m%d_%H%M%S")
+    backup_dir = os.path.join(os.path.dirname(DIGITS_DIR), "backup_" + ts)
+    os.makedirs(backup_dir, exist_ok=True)
+    for fn in os.listdir(DIGITS_DIR):
+        if fn.endswith(".png"):
+            shutil.copy(os.path.join(DIGITS_DIR, fn),
+                        os.path.join(backup_dir, fn))
+    return backup_dir
+
+
+def restore_backup(backup_dir):
+    """恢复指定备份目录的模板到 templates/digits/"""
+    if not os.path.isdir(backup_dir):
+        raise FileNotFoundError("备份目录不存在: %s" % backup_dir)
+    for fn in os.listdir(DIGITS_DIR):
+        if fn.endswith(".png"):
+            os.remove(os.path.join(DIGITS_DIR, fn))
+    n = 0
+    for fn in sorted(os.listdir(backup_dir)):
+        if fn.endswith(".png"):
+            shutil.copy(os.path.join(backup_dir, fn),
+                        os.path.join(DIGITS_DIR, fn))
+            n += 1
+    if n == 0:
+        raise RuntimeError("备份目录中没有模板文件")
+    return n
 
 
 def show_report(result):
-    """图形化对比报告：新旧模板图片并排 + 识别率对比"""
+    """图形化对比报告：新旧模板图片并排 + 识别率对比 + 用户确认启用"""
     import tkinter as tk
+    from tkinter import messagebox
     from PIL import ImageTk
 
     root = tk.Tk()
@@ -419,7 +451,7 @@ def show_report(result):
     else:
         head = result["message"]
     tk.Label(root, text=head, font=("Microsoft YaHei UI", 12),
-             fg="#b00020" if not result.get("applied") else "#006400",
+             fg="#006400" if result.get("better") else "#b00020",
              justify="left").pack(pady=10, padx=12)
 
     def row_images(title, images_map, color):
@@ -441,26 +473,67 @@ def show_report(result):
             for im in imgs:
                 big = im.resize((im.width * 8, im.height * 8),
                                 Image.NEAREST)
-                tk.Label(inner, image=ImageTk.PhotoImage(big)).pack(
-                    side="left", padx=1)
-                # 保持引用防 GC
-                cell._imgs = getattr(cell, "_imgs", []) + [ImageTk.PhotoImage(big)]
+                photo = ImageTk.PhotoImage(big)
+                tk.Label(inner, image=photo).pack(side="left", padx=1)
+                # 同一对象保持引用防 GC（否则图片不显示）
+                cell._imgs = getattr(cell, "_imgs", []) + [photo]
         samples = result.get("samples", {})
         tk.Label(frame, text="样本数: %s" % {d: samples.get(d, 0)
                                              for d in range(10)},
                  font=("Consolas", 8), fg="gray").pack(anchor="w")
 
     row_images("旧模板（当前生效）", result.get("old_images", {}), "#00008b")
-    row_images("新模板（候选）", result.get("new_images", {}), "#006400")
+    row_images("新模板（候选，待确认）", result.get("new_images", {}), "#006400")
 
-    tk.Button(root, text="关闭", command=root.destroy,
-              font=("Microsoft YaHei UI", 11), width=10).pack(pady=10)
+    btn_row = tk.Frame(root)
+    btn_row.pack(pady=10)
+    if result.get("better") and result.get("_variants"):
+        def apply_new():
+            # 用户确认启用：先备份旧模板，再写入新模板
+            try:
+                backup_dir = _backup_digits()
+                _write_digits(result["_variants"])
+                state = _load_state()
+                state["applied"] = True
+                state["backup_dir"] = backup_dir
+                _save_state(state)
+                messagebox.showinfo(
+                    "已启用",
+                    "新模板已启用。\n旧模板已备份到：\n%s\n\n如需回退，执行：\n"
+                    "venv\\Scripts\\python.exe template_learn.py --restore \"%s\""
+                    % (backup_dir, backup_dir))
+                root.destroy()
+            except Exception as e:
+                messagebox.showerror("启用失败", str(e))
+
+        tk.Button(btn_row, text="启用新模板", command=apply_new,
+                  font=("Microsoft YaHei UI", 12), width=14, height=1,
+                  bg="#d9f2d9", fg="#006400").pack(side="left", padx=10)
+    tk.Button(btn_row, text="保留旧模板", command=root.destroy,
+              font=("Microsoft YaHei UI", 12), width=14, height=1,
+              bg="#ffe6e6", fg="#b00020").pack(side="left", padx=10)
     root.mainloop()
 
 
 if __name__ == "__main__":
+    import argparse
+    parser = argparse.ArgumentParser(description="模板学习 / 备份恢复")
+    parser.add_argument("--restore", metavar="备份目录",
+                        help="恢复指定备份目录的模板到 templates/digits/")
+    args = parser.parse_args()
+    if args.restore:
+        try:
+            n = restore_backup(args.restore)
+            print("已从备份恢复 %d 个模板文件到 templates/digits/" % n)
+            state = _load_state()
+            state["applied"] = False
+            _save_state(state)
+            print("恢复完成（learn_state 已标记为未启用新模板）")
+        except Exception as e:
+            print("恢复失败: %s" % e)
+            sys.exit(1)
+        sys.exit(0)
     print("开始模板学习（全量收集 + 回放对比，约 5-8 分钟）...")
-    print("提示：期间请勿关闭窗口；日志帧文件夹在滚动时对比会自动重跑")
     result = learn_once(force=True)
     if result is None:
         print("无需学习（无新增接受帧）")
