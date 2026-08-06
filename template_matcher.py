@@ -27,28 +27,46 @@ class TemplateMatcher:
                 "templates", "digits")
         self.height = height
         self.score_min = score_min
-        self.templates = {}   # d -> uint8 图（数字=255，背景=0，高=height）
+        self.templates = {}   # d -> [变体图列表]（数字=255，背景=0，高=height）
         self._load(template_dir)
 
-    def _load(self, template_dir):
+    def _norm_one(self, path):
+        """加载单张模板图并归一化到统一高度"""
         from PIL import Image
+        try:
+            img = np.array(Image.open(path).convert("L"))
+        except Exception:
+            return None
+        ys, xs = np.where(img > 127)
+        if len(ys) == 0:
+            return None
+        sub = img[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
+        h = sub.shape[0]
+        w_new = max(1, int(round(sub.shape[1] * self.height / h)))
+        sub = cv2.resize(sub, (w_new, self.height), interpolation=cv2.INTER_LANCZOS4)
+        return (sub > 127).astype(np.uint8) * 255
+
+    def _load(self, template_dir):
+        # 多样本变体优先：{d}_0.png, {d}_1.png...；无变体时回退单模板 {d}.png
         for d in range(10):
-            p = os.path.join(template_dir, "%d.png" % d)
-            if not os.path.isfile(p):
-                continue
-            try:
-                img = np.array(Image.open(p).convert("L"))
-            except Exception:
-                continue
-            # 收缩到实际内容并归一化到统一高度
-            ys, xs = np.where(img > 127)
-            if len(ys) == 0:
-                continue
-            sub = img[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
-            h = sub.shape[0]
-            w_new = max(1, int(round(sub.shape[1] * self.height / h)))
-            sub = cv2.resize(sub, (w_new, self.height), interpolation=cv2.INTER_LANCZOS4)
-            self.templates[d] = (sub > 127).astype(np.uint8) * 255
+            variants = []
+            i = 0
+            while True:
+                p = os.path.join(template_dir, "%d_%d.png" % (d, i))
+                if not os.path.isfile(p):
+                    break
+                t = self._norm_one(p)
+                if t is not None:
+                    variants.append(t)
+                i += 1
+            if not variants:
+                p = os.path.join(template_dir, "%d.png" % d)
+                if os.path.isfile(p):
+                    t = self._norm_one(p)
+                    if t is not None:
+                        variants.append(t)
+            if variants:
+                self.templates[d] = variants
 
     def ok(self):
         return len(self.templates) == 10
@@ -99,20 +117,24 @@ class TemplateMatcher:
         resized = resized[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
         best_d, best_s = None, -1.0
         second_s = -1.0
-        for d, tpl in self.templates.items():
-            th, tw = tpl.shape
-            rh, rw = resized.shape
-            if tw == rw and th == rh:
-                t = tpl
-            else:
-                t = cv2.resize(tpl, (rw, rh), interpolation=cv2.INTER_LANCZOS4)
-            res = cv2.matchTemplate(resized, t, cv2.TM_CCOEFF_NORMED)
-            s = float(res[0][0])
-            if s > best_s:
+        for d, variants in self.templates.items():
+            # 每数字取所有变体的最高分（覆盖形态差异）
+            var_best = -1.0
+            for tpl in variants:
+                th, tw = tpl.shape
+                rh, rw = resized.shape
+                if tw == rw and th == rh:
+                    t = tpl
+                else:
+                    t = cv2.resize(tpl, (rw, rh), interpolation=cv2.INTER_LANCZOS4)
+                s = float(cv2.matchTemplate(resized, t, cv2.TM_CCOEFF_NORMED)[0][0])
+                if s > var_best:
+                    var_best = s
+            if var_best > best_s:
                 second_s = best_s
-                best_s, best_d = s, d
-            elif s > second_s:
-                second_s = s
+                best_s, best_d = var_best, d
+            elif var_best > second_s:
+                second_s = var_best
         if best_s < self.score_min or (best_s - second_s) < SCORE_GAP:
             return None
         return best_d, best_s
