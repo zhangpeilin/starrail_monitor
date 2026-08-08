@@ -51,6 +51,13 @@ class BattleTracker:
         self.last_progress = None    # 最近一次进度（0-100）
         self._sword = self._load("sword.png")
         self._heart = self._load("heart.png")
+        self._progress_matcher = None
+        try:
+            from template_matcher import TemplateMatcher
+            self._progress_matcher = TemplateMatcher(
+                template_dir=os.path.join(TPL_DIR, "digits"))
+        except Exception:
+            pass
         self._title_ok = self._load("title_success.png")
         self._title_fail = self._load("title_fail.png")
         self._lock = threading.Lock()
@@ -131,7 +138,9 @@ class BattleTracker:
         return ((sw[0], by0, band_x1, by1), sw, hw)
 
     def read_progress(self, gray, band_rect, sword_rect, heart_rect=None):
-        """进度数字提取：剑图标右缘 +固定窗口 → 白名单 OCR → 取 ≤100 数字"""
+        """进度数字提取（内容驱动）：
+        条带右侧 >180 掩码 → 数字组件（x 重叠聚类合并修复断裂）→
+        进度字体模板匹配（多变体）→ 缺模板数字 OCR 兜底 → 拼接 ≤100"""
         if gray is None:
             return None
         H, W = gray.shape
@@ -139,32 +148,103 @@ class BattleTracker:
             return None
         bx0, by0, bx1, by1 = band_rect
         sx1 = sword_rect[2]
-        # 固定间隙序列（标定自 1922 窗口）：剑右缘+45px 起为进度区
-        # （避开左侧 "1-3" 的 "3" 在 +39px 结束）
-        rx0 = sx1 + max(40, int(W * 0.023))
-        rx1 = min(bx1, sx1 + max(100, int(W * 0.055)))
-        ry0, ry1 = by0, by1
+        # 搜索区：剑右缘 +30 ~ +125（覆盖 1-3 位进度数字+%，避开左侧关卡）
+        rx0 = sx1 + max(42, int(W * 0.022))    # 避开左侧 "1-3"（剑右缘+39 结束）
+        rx1 = min(bx1, sx1 + max(120, int(W * 0.062)))
+        # y 收窄到数字带（剑带中间 50%），避开进度条（剑带下部）干扰
+        ry0 = by0 + int((by1 - by0) * 0.2)
+        ry1 = by0 + int((by1 - by0) * 0.85)
         if rx1 <= rx0 or ry1 <= ry0:
             return None
         sub = gray[ry0:ry1, rx0:rx1]
-        # 白字黑描边：亮色掩码（>150 灰度）→ 黑字白底放大
-        mask = (sub > 150).astype(np.uint8) * 255
-        if int((mask > 0).sum()) < 10:
+        mask = sub > 180
+        if int(mask.sum()) < 10:
             return None
-        crop = Image.fromarray(255 - mask).resize(
+        # 数字组件 + x 重叠聚类合并（修复 0 的纵向断裂）
+        import starrail_monitor as _sm
+        comps = [c for c in _sm.components(mask) if c[4] >= 15]
+        if not comps:
+            return None
+        max_area = max(c[4] for c in comps)
+        # 面积过滤：% 符号碎片/噪声（面积 < 最大组件 30%）丢弃
+        comps = [c for c in comps if c[4] >= max(20, max_area * 0.3)]
+        comps.sort(key=lambda c: c[0])
+        merged = []
+        for c in comps:
+            if merged and c[0] < merged[-1][2] - 2:
+                m = merged[-1]
+                merged[-1] = (min(m[0], c[0]), min(m[1], c[1]),
+                              max(m[2], c[2]), max(m[3], c[3]), m[4] + c[4])
+            else:
+                merged.append(c)
+        # 逐组件识别（连续前缀）：从左到右匹配，首个失败段（% 碎片/噪声）
+        # 之后的组件忽略——% 符号恒在数字右侧
+        digits = []
+        for c in merged:
+            seg = mask[c[1]:c[3] + 1, c[0]:c[2] + 1].astype(np.uint8) * 255
+            d = self._match_progress_digit(seg)
+            if d is None:
+                break
+            digits.append(d)
+        if digits:
+            v = 0
+            for d in digits:
+                v = v * 10 + d
+            if v <= 100:
+                return v
+        # 兜底：整窗口 OCR（0 断裂等多段场景，OCR 对 0 稳定）
+        crop = Image.fromarray(255 - (sub > 150).astype(np.uint8) * 255).resize(
             (mask.shape[1] * 6, mask.shape[0] * 6), Image.LANCZOS)
         text = self._ocr_digits(crop)
-        if not text:
-            return None
-        # 规则：≤100 的匹配取最后一个；否则取最后两位
-        for m in re.findall(r"(\d{1,3})", text):
-            v = int(m)
+        for m_ in re.findall(r"(\d{1,3})", text):
+            v = int(m_)
             if v <= 100:
                 return v
         if len(text) >= 2:
             v = int(text[-2:])
             if v <= 100:
                 return v
+        return None
+
+    def _match_progress_digit(self, seg):
+        """单数字掩码段 → 像素差模板匹配（进度字体 2/3/8 相似，
+        NCC 的 SCORE_GAP 0.15 不可靠）→ OCR 兜底 → int 或 None"""
+        m = self._progress_matcher
+        h = seg.shape[0]
+        if h <= 0:
+            return None
+        w_new = max(1, int(round(seg.shape[1] * 16 / h)))
+        r = cv2.resize(seg, (w_new, 16), interpolation=cv2.INTER_LANCZOS4)
+        ys, xs = np.where(r > 127)
+        if len(ys) == 0:
+            return None
+        r = r[ys.min():ys.max() + 1, xs.min():xs.max() + 1]
+        if m is not None:
+            # 按数字聚合（每数字取所有变体最小差，重复变体不影响次优）
+            d_min = {}
+            for d, tpls in m.templates.items():
+                best_for_d = 1e9
+                for tpl in tpls:
+                    w = max(r.shape[1], tpl.shape[1])
+                    c1 = np.zeros((16, w), np.uint8)
+                    c2 = np.zeros((16, w), np.uint8)
+                    c1[:r.shape[0], :r.shape[1]] = r
+                    c2[:tpl.shape[0], :tpl.shape[1]] = tpl
+                    diff = float(np.abs(c1.astype(int) - c2.astype(int)).mean())
+                    best_for_d = min(best_for_d, diff)
+                d_min[d] = best_for_d
+            order = sorted(d_min.items(), key=lambda kv: kv[1])
+            best_d, best_diff = order[0]
+            second_diff = order[1][1] if len(order) > 1 else 1e9
+            # 阈值：正确模板差 <25 且与次优数字差距显著
+            if best_diff < 25 and best_diff < second_diff * 0.6:
+                return best_d
+        # OCR 兜底（0/4/5/6/9 等缺模板数字）
+        crop = Image.fromarray((255 - seg.astype(np.uint8) * 255)).resize(
+            (w_new * 8, 16 * 8), Image.LANCZOS)
+        text = self._ocr_digits(crop)
+        if len(text) == 1 and text.isdigit():
+            return int(text)
         return None
 
     def read_stage(self, gray, sword_rect):
