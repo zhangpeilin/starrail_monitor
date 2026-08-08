@@ -160,15 +160,41 @@ class BattleTracker:
         mask = sub > 180
         if int(mask.sum()) < 10:
             return None
-        # 数字组件 + x 重叠聚类合并（修复 0 的纵向断裂）
+        # 数字组件 + 列投影分离（44 合并）+ x 重叠聚类合并（0 断裂）
         import starrail_monitor as _sm
         comps = [c for c in _sm.components(mask) if c[4] >= 15]
         if not comps:
             return None
         max_area = max(c[4] for c in comps)
-        # 面积过滤：% 符号碎片/噪声（面积 < 最大组件 30%）丢弃
-        comps = [c for c in comps if c[4] >= max(20, max_area * 0.3)]
+        # 过滤：% 碎片/噪声（面积 < 最大 30% 或高度 < 最大 60%）
+        max_h = max(c[3] - c[1] + 1 for c in comps)
+        comps = [c for c in comps
+                 if c[4] >= max(20, max_area * 0.3)
+                 and (c[3] - c[1] + 1) >= max_h * 0.6]
         comps.sort(key=lambda c: c[0])
+        # 相邻数字合并（如 44）→ 无膨胀列投影分离
+        if max(c[2] - c[0] + 1 for c in comps) > 14:
+            colsum = mask.sum(axis=0)
+            col_segs = []
+            cur = None
+            for i, v in enumerate(colsum):
+                if v > 0:
+                    if cur is None:
+                        cur = [i, i]
+                    else:
+                        cur[1] = i
+                else:
+                    if cur is not None and i - cur[1] > 2:
+                        col_segs.append(tuple(cur))
+                        cur = None
+            if cur is not None:
+                col_segs.append(tuple(cur))
+            comps = []
+            for sx, ex in col_segs:
+                ys, xs = np.where(mask[:, sx:ex + 1])
+                if len(ys):
+                    comps.append((sx, ys.min(), ex, ys.max(),
+                                  int(mask[:, sx:ex + 1].sum())))
         merged = []
         for c in comps:
             if merged and c[0] < merged[-1][2] - 2:
@@ -237,9 +263,9 @@ class BattleTracker:
             best_d, best_diff = order[0]
             second_diff = order[1][1] if len(order) > 1 else 1e9
             # 阈值：正确模板差 <45（渲染变体差异可达 38）且与次优差距显著
-            if best_diff < 45 and best_diff < second_diff * 0.6:
-                if best_diff < 20:
-                    self._maybe_add_variant(r, best_d)  # 仅高置信时自动积累形态
+            if best_diff < 45 and best_diff < second_diff * 0.85:
+                # 自动变体采集已关闭（误配段会污染模板库，如 8 段误配 3）；
+                # 模板积累改由 scan_progress_templates.py 离线扫描完成
                 return best_d
         # OCR 兜底（0/4/5/6/9 等缺模板数字）
         crop = Image.fromarray((255 - seg.astype(np.uint8) * 255)).resize(
