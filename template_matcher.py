@@ -47,19 +47,25 @@ class TemplateMatcher:
         return (sub > 127).astype(np.uint8) * 255
 
     def _load(self, template_dir):
-        # 多样本变体优先：{d}_0.png, {d}_1.png...；
-        # 变体存在时旧单模板 {d}.png 一并保留（旧模板+新变体并存，覆盖多形态）
+        # 多样本变体优先：{d}_N.png 全部加载（编号可跳跃——重命名/删除
+        # 变体后不依赖连续编号，避免后续变体被漏加载）；
+        # 变体存在时旧单模板 {d}.png 一并保留（覆盖多形态）
+        try:
+            files = os.listdir(template_dir)
+        except OSError:
+            files = []
         for d in range(10):
             variants = []
-            i = 0
-            while True:
-                p = os.path.join(template_dir, "%d_%d.png" % (d, i))
-                if not os.path.isfile(p):
-                    break
-                t = self._norm_one(p)
+            idxs = []
+            for fn in files:
+                if fn.startswith("%d_" % d) and fn.endswith(".png"):
+                    core = fn[len(str(d)) + 1:-4]
+                    if core.isdigit():
+                        idxs.append(int(core))
+            for i in sorted(idxs):
+                t = self._norm_one(os.path.join(template_dir, "%d_%d.png" % (d, i)))
                 if t is not None:
                     variants.append(t)
-                i += 1
             if variants:
                 p = os.path.join(template_dir, "%d.png" % d)
                 if os.path.isfile(p):
