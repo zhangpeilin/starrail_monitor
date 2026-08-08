@@ -854,6 +854,9 @@ DEFAULT_CONFIG = {
     "action_drop_max": 20,           # 同回合一帧内最大允许降幅（超过=丢位误读丢弃）
     "rapid_recheck": False,          # RapidOCR 复核默认关闭（本地推理与游戏抢CPU会卡，需手动开启）
     "rapid_baseline_s": 6,           # 周期基线校准间隔（秒，RapidOCR 复核）
+    "sound_trigger": False,          # 声音触发（WASAPI 进程环回，需 templates/sounds/ 有音效样本）
+    "sound_threshold": 0.13,         # 音效匹配触发阈值（越低越灵敏）
+    "game_process": "StarRail.exe",  # 游戏进程名（声音捕获目标）
 }
 
 
@@ -861,6 +864,44 @@ DEFAULT_CONFIG = {
 # 识别记录：历史 CSV + 成功画面存档
 # --------------------------------------------------------------------------
 _GUI_LOG_LOCK = threading.Lock()
+
+
+class LogGate:
+    """日志门控（借鉴 ok-nte LogGate 精简版）：
+      - allow(key, interval)：同 key 在 interval 秒内最多放行一次（节流高频日志）
+      - allow_message(key, msg, interval, changed)：节流 + 消息内容变化时立即放行
+    线程安全。
+    """
+
+    def __init__(self, time_func=time.time):
+        self._time = time_func
+        self._states = {}
+        self._lock = threading.Lock()
+
+    def allow(self, key, interval):
+        if interval <= 0:
+            return True
+        now = self._time()
+        with self._lock:
+            st = self._states.setdefault(key, [0.0, None])
+            if now - st[0] < interval:
+                return False
+            st[0] = now
+            return True
+
+    def allow_message(self, key, message, interval, changed=False):
+        now = self._time()
+        with self._lock:
+            st = self._states.setdefault(key, [0.0, None])
+            if changed and st[1] != message:
+                st[0], st[1] = now, message
+                return True
+            if interval <= 0:
+                return True
+            if now - st[0] < interval:
+                return False
+            st[0], st[1] = now, message
+            return True
 
 
 def append_gui_log(ts, msg):
@@ -1002,6 +1043,7 @@ class MonitorApp:
             self.rapid = RapidRechecker(min_interval=3.0)
         except Exception:
             self.rapid = None
+        self._init_sound()
         self.last_rapid_base = 0.0
         self.monitor_thread = None
         self.stop_event = threading.Event()
@@ -1012,6 +1054,9 @@ class MonitorApp:
         self.silent_round = False   # 本局静默（点"本局不再提醒"后置真，新对局自动恢复）
         self.consecutive = 0
         self.running = False
+        # 日志门控（借鉴 ok-nte LogGate）：未识别节流 + 数值变化轨迹
+        self._log_gate = LogGate()
+        self._last_logged_val = None
         self._build_ui()
         self.root.after(100, self._poll_queue)
         if self.ocr.ok():
@@ -1100,6 +1145,10 @@ class MonitorApp:
         self.cb_fg = tk.Checkbutton(row3, text="仅游戏窗口在前台时监测(屏幕模式)",
                                     variable=self.var_fg)
         self.cb_fg.pack(side="left")
+        self.var_sound_trig = tk.BooleanVar(value=self.cfg.get("sound_trigger", False))
+        self.cb_sound_trig = tk.Checkbutton(row3, text="声音触发(需音效样本)",
+                                            variable=self.var_sound_trig)
+        self.cb_sound_trig.pack(side="left", padx=16)
 
         frm3 = tk.Frame(root)
         frm3.pack(fill="x", **pad)
@@ -1128,9 +1177,10 @@ class MonitorApp:
         frm5.pack(fill="both", expand=True, **pad)
         self.txt_log = tk.Text(frm5, height=12, state="disabled", font=("Consolas", 9))
         self.txt_log.pack(fill="both", expand=True)
-        # 日志高亮：丢弃=红，突变确认/新对局=橙
+        # 日志高亮：丢弃=红，突变确认/新对局=橙，声音事件=蓝
         self.txt_log.tag_configure("drop", foreground="#cc0000")
         self.txt_log.tag_configure("event", foreground="#b06000")
+        self.txt_log.tag_configure("sound", foreground="#0060cc")
 
         root.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -1320,6 +1370,12 @@ class MonitorApp:
         self.consecutive = 0
         self.filter.reset()
         self.stop_event.clear()
+        # 声音触发：开关打开且模板已加载 → 启动监听（独立线程，崩溃自动重启）
+        if self.cfg.get("sound_trigger") and self.sound is not None:
+            try:
+                self.sound.start()
+            except Exception as e:
+                self.log("声音触发启动失败: %s" % e)
         self.monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
         self.monitor_thread.start()
         self.btn_start.configure(state="disabled")
@@ -1332,6 +1388,11 @@ class MonitorApp:
     def stop_monitor(self):
         self.running = False
         self.stop_event.set()
+        if self.sound is not None:
+            try:
+                self.sound.stop()
+            except Exception:
+                pass
         if self.capture is not None:
             try:
                 self.capture.close()
@@ -1343,6 +1404,35 @@ class MonitorApp:
         self.btn_region.configure(state="normal")
         self.lbl_status.configure(text="已停止")
         self.log("监测已停止")
+
+    # ---------------- 声音触发（借鉴 ok-nte 声音驱动思路） ----------------
+    def _init_sound(self):
+        """加载 templates/sounds/*.wav 为音效模板，构造 SoundListener（不启动）"""
+        self.sound = None
+        try:
+            sounds_dir = os.path.join(SCRIPT_DIR, "templates", "sounds")
+            samples = {}
+            if os.path.isdir(sounds_dir):
+                for f in sorted(os.listdir(sounds_dir)):
+                    if f.lower().endswith(".wav") and not f.lower().startswith("cand"):
+                        samples[os.path.splitext(f)[0]] = os.path.join(sounds_dir, f)
+            if not samples:
+                return
+            from sound_trigger import SoundListener
+            self.sound = SoundListener(
+                self.cfg.get("game_process", "StarRail.exe"),
+                samples,
+                threshold=float(self.cfg.get("sound_threshold", 0.13)))
+            self.sound.on_triggered = self._on_sound_triggered
+            self.log("声音触发就绪：%d 个音效模板（%s）"
+                     % (len(samples), ", ".join(sorted(samples))))
+        except Exception as e:
+            self.log("声音触发不可用: %s" % e)
+            self.sound = None
+
+    def _on_sound_triggered(self, name, score):
+        self.msg_queue.put({"status": "声音事件",
+                            "info": "%s(分数%.2f)" % (name, score)})
 
     def _sync_params(self):
         def getv(spin):
@@ -1368,6 +1458,7 @@ class MonitorApp:
         self.cfg["log_history"] = self.var_log.get()
         self.cfg["save_frames"] = self.var_save.get()
         self.cfg["allow_action_reset"] = self.var_reset.get()
+        self.cfg["sound_trigger"] = self.var_sound_trig.get()
         save_config(self.cfg)
 
     def open_logs(self):
@@ -1574,15 +1665,28 @@ class MonitorApp:
                 if "turn" in msg:
                     self.lbl_values.configure(text="回合数: %s  行动值: %s"
                                                % (msg["turn"], msg["action"]))
+                    # 数值变化轨迹（changed 模式）：回合/行动值变化时记录一条，
+                    # 不变时静默——事后可从日志还原完整数值变化时间线
+                    cur = (msg["turn"], msg["action"])
+                    if self._last_logged_val != cur:
+                        self._last_logged_val = cur
+                        self.log("数值: 回合%d 行动值%d" % (cur[0], cur[1]))
+                if msg.get("status") == "声音事件" and msg.get("info"):
+                    self.log("声音: %s" % msg["info"], tag="sound")
                 if msg.get("status") == "模板学习" and msg.get("info"):
                     self.log("事件: %s" % msg["info"], tag="event")
                 if msg.get("info") and msg.get("status") == "未识别到数字":
                     # 精简滚动日志：未定位到倒计时条是高频噪音（条浮动/遮挡常态），隐藏；
                     # 保留有条但提取失败/整区域识别异常的诊断信息
-                    if not msg["info"].startswith("未定位到倒计时条"):
+                    if not msg["info"].startswith("未定位到倒计时条") \
+                            and self._log_gate.allow_message(
+                                "unrecog", msg["info"], 5.0, changed=True):
                         self.log("未识别: %s" % msg["info"])
                 elif msg.get("status", "").startswith("丢弃"):
-                    self.log("%s (%s)" % (msg["status"], msg.get("info", "")),
+                    drop_note = ""
+                    if "行动值骤降" in msg["status"]:
+                        drop_note = "（疑似数字切换过渡帧，像素级缺位，防御正确）"
+                    self.log("%s (%s)%s" % (msg["status"], msg.get("info", ""), drop_note),
                              tag="drop")
                 elif ("突变确认" in msg.get("info", "") or "新对局" in msg.get("info", "")
                       or "骤降确认" in msg.get("info", "")

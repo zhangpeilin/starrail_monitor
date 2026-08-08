@@ -8,3 +8,7 @@ elev_pw.png
 监控崩坏星穹铁道回合行动值_*.md
 templates/samples/
 templates/learn_state.json
+capture_test.wav
+capture_test_*.wav
+templates/sounds/candidates/
+templates/sounds/*.npy
