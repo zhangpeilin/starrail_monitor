@@ -29,7 +29,8 @@ LOGS_DIR = os.path.join(SCRIPT_DIR, "logs")
 CALIB_W, CALIB_H = 1922, 1239
 # 顶部条带搜索区域（窗口相对比例：x 25%-65%，y 2%-10%）
 BAND_X0, BAND_X1 = 0.25, 0.65
-BAND_Y0, BAND_Y1 = 0.02, 0.10
+# Y0=0：新UI锚点(Y形图标)顶部贴近 y0；旧UI剑图标在带内不受影响
+BAND_Y0, BAND_Y1 = 0.0, 0.10
 # 标题检测区域（窗口相对比例，与模板裁剪坐标一致 x830-1090/y293-362）
 TITLE_X0, TITLE_X1 = 0.4318, 0.5671
 TITLE_Y0, TITLE_Y1 = 0.2365, 0.2922
@@ -50,6 +51,7 @@ class BattleTracker:
         self.battle_start_ts = 0.0
         self.last_progress = None    # 最近一次进度（0-100）
         self._sword = self._load("sword.png")
+        self._yicon = self._load("yicon.png")   # 新UI锚点（Y形图标，与剑形并列二选一）
         self._heart = self._load("heart.png")
         self._progress_matcher = None
         try:
@@ -100,7 +102,8 @@ class BattleTracker:
 
     # ---------------- 检测 ----------------
     def find_band(self, gray):
-        """顶部条带定位：剑图标 + 心形图标 → (band_rect, sword_rect, heart_rect) 或 None"""
+        """顶部条带定位：锚点图标（剑形优先，Y形兜底）+ 心形图标
+        → (band_rect, sword_rect, heart_rect) 或 None"""
         if gray is None or self._sword is None:
             return None
         H, W = gray.shape
@@ -110,6 +113,9 @@ class BattleTracker:
             return None
         band = gray[y0:y1, x0:x1]
         sword = self._match(band, self._scale(self._sword, W, H), SWORD_THRESHOLD)
+        if sword is None and self._yicon is not None:
+            # 新UI锚点：Y形图标（与剑形并列，不同关卡二选一，位置一致）
+            sword = self._match(band, self._scale(self._yicon, W, H), SWORD_THRESHOLD)
         if sword is None:
             return None
         sw = (x0 + sword[1], y0 + sword[2], x0 + sword[1] + sword[3], y0 + sword[2] + sword[4])
@@ -297,7 +303,8 @@ class BattleTracker:
             return None
         sx1 = sword_rect[2]
         rx0 = sx1 + max(2, int(W * 0.002))
-        rx1 = sx1 + max(38, int(W * 0.021))
+        # +48：新UI关卡文本（2-5）比旧UI（1-3）宽~2px，原+38会切掉第二数字右缘
+        rx1 = sx1 + max(48, int(W * 0.025))
         ry0 = ry1 = None
         if sword_rect[1] is not None:
             ry0, ry1 = sword_rect[1], sword_rect[3]
