@@ -29,7 +29,7 @@ import tkinter as tk
 from datetime import datetime
 
 import numpy as np
-from PIL import Image, ImageFilter, ImageGrab, ImageOps
+from PIL import Image, ImageDraw, ImageFilter, ImageGrab, ImageOps
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(SCRIPT_DIR, "config.json")
@@ -919,6 +919,8 @@ DEFAULT_CONFIG = {
     "sound_trigger": False,          # 声音触发（WASAPI 进程环回，需 templates/sounds/ 有音效样本）
     "sound_threshold": 0.13,         # 音效匹配触发阈值（越低越灵敏）
     "game_process": "StarRail.exe",  # 游戏进程名（声音捕获目标）
+    "battle_progress": True,         # 对局进度/开始结束监测（需 templates/battle/ 模板）
+    "battle_interval_s": 1.0,        # 对局进度检测间隔（秒）
 }
 
 
@@ -1138,6 +1140,7 @@ class MonitorApp:
         except Exception:
             self.rapid = None
         self._init_sound()
+        self._init_battle_tracker()
         self.last_rapid_base = 0.0
         self.monitor_thread = None
         self.stop_event = threading.Event()
@@ -1265,6 +1268,8 @@ class MonitorApp:
         self.btn_stop = tk.Button(frm4, text="停止", command=self.stop_monitor, state="disabled")
         self.btn_stop.pack(side="left", padx=6)
         self.btn_logs = tk.Button(frm4, text="打开日志", command=self.open_logs)
+        self.btn_preview = tk.Button(frm4, text="预览区域", command=self.show_preview)
+        self.btn_preview.pack(side="left", padx=6)
         self.btn_logs.pack(side="left", padx=6)
 
         frm5 = tk.LabelFrame(root, text="日志", padx=8, pady=6)
@@ -1482,6 +1487,11 @@ class MonitorApp:
     def stop_monitor(self):
         self.running = False
         self.stop_event.set()
+        if self.battle is not None:
+            try:
+                self.battle.force_reset()
+            except Exception:
+                pass
         if self.sound is not None:
             try:
                 self.sound.stop()
@@ -1528,6 +1538,53 @@ class MonitorApp:
         self.msg_queue.put({"status": "声音事件",
                             "info": "%s(分数%.2f)" % (name, score)})
 
+    # ---------------- 对局进度/开始结束监测 ----------------
+    def _init_battle_tracker(self):
+        """初始化对局状态机（剑图标锚点+进度OCR+结算标题检测）"""
+        self.battle = None
+        self._battle_last = 0.0
+        try:
+            from battle_progress import BattleTracker
+            t = BattleTracker(self.ocr)
+            if t.templates_ok:
+                self.battle = t
+                self.log("对局监测就绪（进度/开始/结束）")
+            else:
+                self.log("对局监测未启用：缺少 templates/battle/ 模板")
+        except Exception as e:
+            self.battle = None
+            self.log("对局监测不可用: %s" % e)
+
+    def _battle_tick(self):
+        """低频整帧捕获 → 对局状态机 → 事件入队；返回 True 表示有事件"""
+        if self.battle is None or not self.cfg.get("battle_progress", True):
+            return False
+        interval = float(self.cfg.get("battle_interval_s", 1.0))
+        now = time.time()
+        if now - self._battle_last < interval:
+            return False
+        self._battle_last = now
+        try:
+            cap = self.capture if self.capture is not None else self._make_capture()
+            shot = cap.grab()
+            if shot is None:
+                return False
+            gray = np.array(shot.convert("L"), dtype=np.uint8)
+            events = self.battle.update(gray)
+            for ev_type, msg in events:
+                if ev_type == "battle_start":
+                    # 新对局：重置基线，直接接受新值
+                    self.filter.reset()
+                    self.msg_queue.put({"status": "对局开始"})
+                elif ev_type == "battle_end":
+                    self.msg_queue.put({"status": "对局结束", "info": msg})
+                elif ev_type == "progress":
+                    self.msg_queue.put({"status": "进度",
+                                        "info": "进度 %d%%" % msg})
+            return bool(events)
+        except Exception:
+            return False
+
     def _sync_params(self):
         def getv(spin):
             try:
@@ -1555,6 +1612,80 @@ class MonitorApp:
         self.cfg["sound_trigger"] = self.var_sound_trig.get()
         save_config(self.cfg)
 
+    def show_preview(self):
+        """预览当前定位区域：整帧标注（监测区域+进度条带）+ 行动值区域 + 进度区域组合"""
+        try:
+            cap = self._make_capture()
+            shot = cap.grab()
+            try:
+                cap.close()
+            except Exception:
+                pass
+            if shot is None:
+                self.log("预览失败：捕获无画面")
+                return
+            gray = np.array(shot.convert("L"), dtype=np.uint8)
+            mode = self.cfg["capture_mode"]
+            region = self.cfg.get("win_region" if mode == "window" else "region")
+
+            win = tk.Toplevel(self.root)
+            win.title("定位区域预览")
+            from PIL import ImageTk
+            imgs = []
+            labels = []
+            # 1. 整帧缩略（红框=监测区域，绿框=进度条带）
+            thumb = shot.copy()
+            if region:
+                d = ImageDraw.Draw(thumb)
+                d.rectangle(region, outline=(255, 0, 0), width=3)
+            if self.battle is not None:
+                band = self.battle.find_band(gray)
+                if band is not None:
+                    d = ImageDraw.Draw(thumb)
+                    d.rectangle(band[1], outline=(0, 220, 0), width=3)   # 剑
+                    if band[2]:
+                        d.rectangle(band[2], outline=(0, 200, 255), width=2)  # 心形
+            tw, th = thumb.size
+            if tw > 480:
+                thumb = thumb.resize((480, int(th * 480 / tw)), Image.LANCZOS)
+            imgs.append(thumb)
+            labels.append("整帧（红=监测区域 绿=进度条带）")
+            # 2. 行动值监测区域
+            if region:
+                col = shot.crop(region)
+                cw, ch = col.size
+                if cw > 300:
+                    col = col.resize((300, int(ch * 300 / cw)), Image.LANCZOS)
+                imgs.append(col)
+                labels.append("行动值监测区域 %s" % (region,))
+            # 3. 进度条带区域
+            if self.battle is not None:
+                band = self.battle.find_band(gray)
+                if band is not None:
+                    bx0, by0, bx1, by1 = band[0]
+                    pad = 6
+                    prog = shot.crop((max(0, bx0 - pad), max(0, by0 - pad),
+                                      min(shot.width - 1, bx1 + pad),
+                                      min(shot.height - 1, by1 + pad)))
+                    pw, ph = prog.size
+                    if pw > 420:
+                        prog = prog.resize((420, int(ph * 420 / pw)), Image.LANCZOS)
+                    imgs.append(prog)
+                    labels.append("进度条带（剑→心形）")
+            # 组合展示
+            row = tk.Frame(win)
+            row.pack(fill="both", expand=True, padx=8, pady=8)
+            self._preview_photos = []
+            for img, lab in zip(imgs, labels):
+                cell = tk.Frame(row)
+                cell.pack(side="left", padx=6)
+                photo = ImageTk.PhotoImage(img)
+                self._preview_photos.append(photo)   # 保持引用防 GC
+                tk.Label(cell, image=photo).pack()
+                tk.Label(cell, text=lab, font=("Microsoft YaHei UI", 8)).pack()
+        except Exception as e:
+            self.log("预览失败: %s" % e)
+
     def open_logs(self):
         """打开日志目录（识别历史 CSV + 画面存档）"""
         try:
@@ -1571,6 +1702,11 @@ class MonitorApp:
         record_count = 0
         while not self.stop_event.is_set():
             t0 = time.time()
+            # 对局进度/状态低频检测（整帧捕获，与识别并行节流）
+            try:
+                self._battle_tick()
+            except Exception:
+                pass
             try:
                 if self.alert_win is not None:
                     time.sleep(0.4)
@@ -1767,6 +1903,12 @@ class MonitorApp:
                         self.log("数值: 回合%d 行动值%d" % (cur[0], cur[1]))
                 if msg.get("status") == "声音事件" and msg.get("info"):
                     self.log("声音: %s" % msg["info"], tag="sound")
+                if msg.get("status") == "对局开始":
+                    self.log("对局开始：新对局数值已重置接受", tag="event")
+                if msg.get("status") == "对局结束" and msg.get("info"):
+                    self.log("对局结束：%s" % msg["info"], tag="event")
+                if msg.get("status") == "进度" and msg.get("info"):
+                    self.log("进度: %s" % msg["info"])
                 if msg.get("status") == "模板学习" and msg.get("info"):
                     self.log("事件: %s" % msg["info"], tag="event")
                 if msg.get("info") and msg.get("status") == "未识别到数字":
