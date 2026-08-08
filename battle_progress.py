@@ -402,6 +402,7 @@ class BattleTracker:
                     self.battle_start = datetime.now()
                     self.battle_start_ts = __import__("time").time()
                     self.last_progress = None   # 新对局进度归零，重置单调基线
+                    self._new_battle_ts = self.battle_start_ts
                     self._read_band_values(gray, band, rgb)
                     events.append(("battle_start", "对局开始"))
             elif self.state == "BATTLE":
@@ -427,6 +428,7 @@ class BattleTracker:
                     self.battle_start = datetime.now()
                     self.battle_start_ts = __import__("time").time()
                     self.last_progress = None
+                    self._new_battle_ts = self.battle_start_ts
                     self._read_band_values(gray, band, rgb)
                     events.append(("battle_start", "对局开始"))
         return events
@@ -445,6 +447,11 @@ class BattleTracker:
         # 全量存档：每 tick 保存进度条带帧（正常+异常，供事后排查/模板采集）
         self._save_progress_frame(rgb, band, p)
         if p is not None:
+            # 新对局 5 秒内高位值（>10）= 结算页过渡残留误读（新对局进度起步低）
+            new_ts = getattr(self, "_new_battle_ts", 0.0)
+            if p > 10 and __import__("time").time() - new_ts < 5:
+                self._progress_warn = "新对局过渡帧高位 %d 已忽略" % p
+                return
             # 单调性校验：对局内进度只增不减，回退=识别错误（如 50→5），
             # 保持上次值并记录告警（真实回退仅在新对局，已在 battle_start 重置）
             if self.last_progress is not None and p < self.last_progress:
