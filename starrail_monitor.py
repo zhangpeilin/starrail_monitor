@@ -342,12 +342,27 @@ class Extractor:
                 ax1 = max(c[2] for c in acts)
                 ay0 = min(c[1] for c in acts)
                 ay1 = max(c[3] for c in acts)
+                # 行动值区域 = 白色组件聚类结果。条框右边界已由
+                # locate_bar 的黑底纹修正兜底（黑底不随数字淡出），
+                # 过渡帧残影数字的组件在条框完整后自然存在，无需再扩展。
                 action_img = mask_to_image(white, ax0, ay0, ax1, ay1)
                 info.append("行动值区域(%d,%d)-(%d,%d)" % (ax0, ay0, ax1, ay1))
                 # 回合数：沙漏右侧、行动值左侧、垂直与行动值有交叠的同色组件
-                turns = [c for c in yc if c[0] > hourglass[2] and c[2] < ax0
-                         and c[3] > ay0 - 5 and c[1] < ay1 + 5]
-                if turns:
+                turn_cands = [c for c in yc if c[0] > hourglass[2] and c[2] < ax0
+                              and c[3] > ay0 - 5 and c[1] < ay1 + 5]
+                if turn_cands:
+                    # 间隔断簇取最左簇（方案A）：沙漏→回合数字间隔 ~5px，
+                    # 回合数字→右侧杂物（装饰/碎片）间隔 ≥9px——簇间隙 >8px 断开，
+                    # 只取最左簇（回合数字本体），排除右侧碎片（如 133543 帧
+                    # x94-96 黄色碎片曾被卷入导致 OCR 把 0 读成 1）
+                    turn_cands.sort(key=lambda c: c[0])
+                    tcl = []
+                    for c in turn_cands:
+                        if tcl and c[0] - tcl[-1][-1][2] <= 8:
+                            tcl[-1].append(c)
+                        else:
+                            tcl.append([c])
+                    turns = tcl[0]
                     tx0 = min(c[0] for c in turns)
                     tx1 = max(c[2] for c in turns)
                     ty0 = min(c[1] for c in turns)
@@ -551,6 +566,45 @@ class ValueFilter:
 # --------------------------------------------------------------------------
 # 列内动态定位倒计时条
 # --------------------------------------------------------------------------
+def find_action_black_right(gray, hyc, x_start, W, H, dark_thr=130,
+                            max_gap=3, min_w=6):
+    """行动值黑底纹右缘检测（借鉴黑底白字 UI 特征：黑底不随数字淡出）
+
+    行动值数字为黑底白字，黑底矩形在过渡帧（数字淡出）时依然完整，
+    而白色组件会消失导致条框收缩。本函数在 y 带 hyc±12 内做列平均
+    亮度剖面，从 x_start 向右找暗段（允许 ≤max_gap 像素的亮隙合并），
+    返回最右侧暗段 (左缘, 右缘) 或 None。
+    """
+    y0, y1 = max(0, int(hyc - 12)), min(H - 1, int(hyc + 12))
+    if y1 <= y0 or x_start >= W:
+        return None
+    band = gray[y0:y1 + 1, x_start:].mean(axis=0)
+    dark = band < dark_thr
+    segs = []
+    cur = None
+    gap = 0
+    for i, v in enumerate(dark):
+        if v:
+            if cur is None:
+                cur = [i, i]
+            else:
+                cur[1] = i
+            gap = 0
+        elif cur is not None:
+            gap += 1
+            if gap > max_gap:
+                if cur[1] - cur[0] + 1 >= min_w:
+                    segs.append(tuple(cur))
+                cur = None
+                gap = 0
+    if cur is not None and cur[1] - cur[0] + 1 >= min_w:
+        segs.append(tuple(cur))
+    if not segs:
+        return None
+    s, e = segs[-1]
+    return (x_start + s, x_start + e)
+
+
 def locate_bar(img):
     """
     在整列区域中定位倒计时条。
@@ -613,8 +667,16 @@ def locate_bar(img):
             continue
         score = c[4] + sum(d[4] for d in digs) + sum(w[4] for w in acts)
         if best is None or score > best[0]:
+            # 行动值黑底纹扩展右边界：黑底不随数字淡出，
+            # 过渡帧白色组件收缩时防止条框切掉残影数字（如 54 只剩 5）
+            gray_a = (r * 0.299 + g * 0.587 + b * 0.114)
+            br = find_action_black_right(gray_a, (cy0 + cy1) / 2.0,
+                                         c[2] + 15, W, H)
+            act_r = max(w[2] for w in acts)
+            if br:
+                act_r = max(act_r, br[1] + 4)
             x0 = min(c[0], min(d[0] for d in digs), min(w[0] for w in acts))
-            x1 = max(c[2], dmax, max(w[2] for w in acts))
+            x1 = max(c[2], dmax, act_r)
             y0 = min(c[1], min(d[1] for d in digs), min(w[1] for w in acts))
             y1 = max(c[3], max(d[3] for d in digs), max(w[3] for w in acts))
             best = (score, x0, y0, x1, y1)
@@ -626,13 +688,14 @@ def locate_bar(img):
             min(W - 1, x1 + pad), min(H - 1, y1 + pad))
 
 
-def extract_column(ocr, column_img):
-    """整列 → 定位倒计时条 → 提取数字。返回 (turn, action, info)"""
+def extract_column(ocr, column_img, matcher=None):
+    """整列 → 定位倒计时条 → 提取数字。返回 (turn, action, info)。
+    matcher 可注入指定模板的 TemplateMatcher（模板学习回放对比用）"""
     bar = locate_bar(column_img)
     if bar is None:
         return None, None, "未定位到倒计时条"
     crop = column_img.crop(bar)
-    ex = Extractor(ocr)
+    ex = Extractor(ocr, matcher=matcher)
     tg, ag, rg, info = ex.extract(crop)
     turn, action = parse_values(tg, ag, rg)
     return turn, action, "条@(%d,%d)-(%d,%d); %s" % (bar[0], bar[1], bar[2], bar[3], info)
@@ -843,7 +906,7 @@ DEFAULT_CONFIG = {
     "cooldown_s": 10,
     "gamma": 1.0,                    # 图像亮度校正（HDR 过曝时可调低）
     "save_frames": True,             # 数字变化/提醒时保存识别画面
-    "max_frames": 500,               # 画面存档上限（超出自动删最旧）
+    "max_frames": 10000,             # 画面存档上限（按日期分文件夹，超出自动删最旧）
     "log_history": True,             # 记录识别历史 CSV
     "max_turn": 99,                  # 回合数合理上限（超出=识别错误丢弃）
     "max_action": 100,               # 行动值合理上限（超出=识别错误丢弃）
@@ -853,6 +916,9 @@ DEFAULT_CONFIG = {
     "action_drop_max": 20,           # 同回合一帧内最大允许降幅（超过=丢位误读丢弃）
     "rapid_recheck": False,          # RapidOCR 复核默认关闭（本地推理与游戏抢CPU会卡，需手动开启）
     "rapid_baseline_s": 6,           # 周期基线校准间隔（秒，RapidOCR 复核）
+    "sound_trigger": False,          # 声音触发（WASAPI 进程环回，需 templates/sounds/ 有音效样本）
+    "sound_threshold": 0.13,         # 音效匹配触发阈值（越低越灵敏）
+    "game_process": "StarRail.exe",  # 游戏进程名（声音捕获目标）
 }
 
 
@@ -860,6 +926,44 @@ DEFAULT_CONFIG = {
 # 识别记录：历史 CSV + 成功画面存档
 # --------------------------------------------------------------------------
 _GUI_LOG_LOCK = threading.Lock()
+
+
+class LogGate:
+    """日志门控（借鉴 ok-nte LogGate 精简版）：
+      - allow(key, interval)：同 key 在 interval 秒内最多放行一次（节流高频日志）
+      - allow_message(key, msg, interval, changed)：节流 + 消息内容变化时立即放行
+    线程安全。
+    """
+
+    def __init__(self, time_func=time.time):
+        self._time = time_func
+        self._states = {}
+        self._lock = threading.Lock()
+
+    def allow(self, key, interval):
+        if interval <= 0:
+            return True
+        now = self._time()
+        with self._lock:
+            st = self._states.setdefault(key, [0.0, None])
+            if now - st[0] < interval:
+                return False
+            st[0] = now
+            return True
+
+    def allow_message(self, key, message, interval, changed=False):
+        now = self._time()
+        with self._lock:
+            st = self._states.setdefault(key, [0.0, None])
+            if changed and st[1] != message:
+                st[0], st[1] = now, message
+                return True
+            if interval <= 0:
+                return True
+            if now - st[0] < interval:
+                return False
+            st[0], st[1] = now, message
+            return True
 
 
 def append_gui_log(ts, msg):
@@ -878,11 +982,11 @@ def append_gui_log(ts, msg):
 class Recorder:
     """监控记录器：
       - logs/history_YYYY-MM-DD.csv  每次识别成功一行（时间,回合数,行动值,提醒,说明）
-      - logs/frames/                 数字变化或触发提醒时的列区域画面（自动保留最近 N 张）
+      - logs/frames/YYYY-MM-DD/      数字变化或触发提醒时的列区域画面（按日期分文件夹，总量保留最近 N 张）
       - logs/gui_YYYY-MM-DD.log      程序界面滚动日志（未识别/丢弃/事件等）完整落盘
     """
 
-    def __init__(self, base_dir, max_frames=500):
+    def __init__(self, base_dir, max_frames=10000):
         self.logs_dir = os.path.join(base_dir, "logs")
         self.frames_dir = os.path.join(self.logs_dir, "frames")
         os.makedirs(self.frames_dir, exist_ok=True)
@@ -890,6 +994,35 @@ class Recorder:
         self._last = None          # 上次 (turn, action)，用于变化检测
         self._csv_path = None
         self._lock = threading.Lock()
+        self._migrate_legacy_frames()
+
+    def _migrate_legacy_frames(self):
+        """旧版帧迁移：logs/frames/ 根目录的 frame_*.png → 按文件名日期子目录"""
+        try:
+            for f in os.listdir(self.frames_dir):
+                p = os.path.join(self.frames_dir, f)
+                if not (f.startswith("frame_") and os.path.isfile(p)):
+                    continue
+                ts = f[6:14]   # frame_YYYYMMDD_...
+                if len(ts) == 8 and ts.isdigit():
+                    d = "%s-%s-%s" % (ts[:4], ts[4:6], ts[6:8])
+                    sub = os.path.join(self.frames_dir, d)
+                    os.makedirs(sub, exist_ok=True)
+                    try:
+                        shutil.move(p, os.path.join(sub, f))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    def _date_dir(self):
+        d = datetime.now().strftime("%Y-%m-%d")
+        p = os.path.join(self.frames_dir, d)
+        try:
+            os.makedirs(p, exist_ok=True)
+        except Exception:
+            pass
+        return p
 
     def _csv(self):
         today = datetime.now().strftime("%Y-%m-%d")
@@ -920,7 +1053,7 @@ class Recorder:
                 try:
                     name = "frame_%s_t%d_a%d.png" % (
                         now.strftime("%Y%m%d_%H%M%S_%f")[:-3], turn, action)
-                    col_img.save(os.path.join(self.frames_dir, name))
+                    col_img.save(os.path.join(self._date_dir(), name))
                 except Exception:
                     pass
 
@@ -934,7 +1067,7 @@ class Recorder:
                 tag = "".join(ch for ch in reason[:8] if ch.isalnum())
                 name = "frame_%s_t%d_a%d_drop_%s.png" % (
                     now.strftime("%Y%m%d_%H%M%S_%f")[:-3], turn, action, tag)
-                col_img.save(os.path.join(self.frames_dir, name))
+                col_img.save(os.path.join(self._date_dir(), name))
             except Exception:
                 pass
             # 丢弃帧不经过 record_count，自行定期清理超限帧
@@ -943,10 +1076,13 @@ class Recorder:
                 self.prune()
 
     def prune(self):
-        """删除超出上限的最旧帧文件"""
+        """删除超出上限的最旧帧文件（递归所有日期子目录 + 根目录旧文件）"""
         try:
-            files = [os.path.join(self.frames_dir, f)
-                     for f in os.listdir(self.frames_dir) if f.startswith("frame_")]
+            files = []
+            for root, _dirs, fs in os.walk(self.frames_dir):
+                for f in fs:
+                    if f.startswith("frame_"):
+                        files.append(os.path.join(root, f))
             if len(files) > self.max_frames:
                 files.sort(key=os.path.getmtime)
                 for f in files[:len(files) - self.max_frames]:
@@ -1001,6 +1137,7 @@ class MonitorApp:
             self.rapid = RapidRechecker(min_interval=3.0)
         except Exception:
             self.rapid = None
+        self._init_sound()
         self.last_rapid_base = 0.0
         self.monitor_thread = None
         self.stop_event = threading.Event()
@@ -1011,6 +1148,9 @@ class MonitorApp:
         self.silent_round = False   # 本局静默（点"本局不再提醒"后置真，新对局自动恢复）
         self.consecutive = 0
         self.running = False
+        # 日志门控（借鉴 ok-nte LogGate）：未识别节流 + 数值变化轨迹
+        self._log_gate = LogGate()
+        self._last_logged_val = None
         self._build_ui()
         self.root.after(100, self._poll_queue)
         if self.ocr.ok():
@@ -1099,6 +1239,10 @@ class MonitorApp:
         self.cb_fg = tk.Checkbutton(row3, text="仅游戏窗口在前台时监测(屏幕模式)",
                                     variable=self.var_fg)
         self.cb_fg.pack(side="left")
+        self.var_sound_trig = tk.BooleanVar(value=self.cfg.get("sound_trigger", False))
+        self.cb_sound_trig = tk.Checkbutton(row3, text="声音触发(需音效样本)",
+                                            variable=self.var_sound_trig)
+        self.cb_sound_trig.pack(side="left", padx=16)
 
         frm3 = tk.Frame(root)
         frm3.pack(fill="x", **pad)
@@ -1127,9 +1271,10 @@ class MonitorApp:
         frm5.pack(fill="both", expand=True, **pad)
         self.txt_log = tk.Text(frm5, height=12, state="disabled", font=("Consolas", 9))
         self.txt_log.pack(fill="both", expand=True)
-        # 日志高亮：丢弃=红，突变确认/新对局=橙
+        # 日志高亮：丢弃=红，突变确认/新对局=橙，声音事件=蓝
         self.txt_log.tag_configure("drop", foreground="#cc0000")
         self.txt_log.tag_configure("event", foreground="#b06000")
+        self.txt_log.tag_configure("sound", foreground="#0060cc")
 
         root.protocol("WM_DELETE_WINDOW", self.on_close)
 
@@ -1319,6 +1464,12 @@ class MonitorApp:
         self.consecutive = 0
         self.filter.reset()
         self.stop_event.clear()
+        # 声音触发：开关打开且模板已加载 → 启动监听（独立线程，崩溃自动重启）
+        if self.cfg.get("sound_trigger") and self.sound is not None:
+            try:
+                self.sound.start()
+            except Exception as e:
+                self.log("声音触发启动失败: %s" % e)
         self.monitor_thread = threading.Thread(target=self._monitor_loop, daemon=True)
         self.monitor_thread.start()
         self.btn_start.configure(state="disabled")
@@ -1331,6 +1482,11 @@ class MonitorApp:
     def stop_monitor(self):
         self.running = False
         self.stop_event.set()
+        if self.sound is not None:
+            try:
+                self.sound.stop()
+            except Exception:
+                pass
         if self.capture is not None:
             try:
                 self.capture.close()
@@ -1342,6 +1498,35 @@ class MonitorApp:
         self.btn_region.configure(state="normal")
         self.lbl_status.configure(text="已停止")
         self.log("监测已停止")
+
+    # ---------------- 声音触发（借鉴 ok-nte 声音驱动思路） ----------------
+    def _init_sound(self):
+        """加载 templates/sounds/*.wav 为音效模板，构造 SoundListener（不启动）"""
+        self.sound = None
+        try:
+            sounds_dir = os.path.join(SCRIPT_DIR, "templates", "sounds")
+            samples = {}
+            if os.path.isdir(sounds_dir):
+                for f in sorted(os.listdir(sounds_dir)):
+                    if f.lower().endswith(".wav") and not f.lower().startswith("cand"):
+                        samples[os.path.splitext(f)[0]] = os.path.join(sounds_dir, f)
+            if not samples:
+                return
+            from sound_trigger import SoundListener
+            self.sound = SoundListener(
+                self.cfg.get("game_process", "StarRail.exe"),
+                samples,
+                threshold=float(self.cfg.get("sound_threshold", 0.13)))
+            self.sound.on_triggered = self._on_sound_triggered
+            self.log("声音触发就绪：%d 个音效模板（%s）"
+                     % (len(samples), ", ".join(sorted(samples))))
+        except Exception as e:
+            self.log("声音触发不可用: %s" % e)
+            self.sound = None
+
+    def _on_sound_triggered(self, name, score):
+        self.msg_queue.put({"status": "声音事件",
+                            "info": "%s(分数%.2f)" % (name, score)})
 
     def _sync_params(self):
         def getv(spin):
@@ -1367,6 +1552,7 @@ class MonitorApp:
         self.cfg["log_history"] = self.var_log.get()
         self.cfg["save_frames"] = self.var_save.get()
         self.cfg["allow_action_reset"] = self.var_reset.get()
+        self.cfg["sound_trigger"] = self.var_sound_trig.get()
         save_config(self.cfg)
 
     def open_logs(self):
@@ -1573,13 +1759,28 @@ class MonitorApp:
                 if "turn" in msg:
                     self.lbl_values.configure(text="回合数: %s  行动值: %s"
                                                % (msg["turn"], msg["action"]))
+                    # 数值变化轨迹（changed 模式）：回合/行动值变化时记录一条，
+                    # 不变时静默——事后可从日志还原完整数值变化时间线
+                    cur = (msg["turn"], msg["action"])
+                    if self._last_logged_val != cur:
+                        self._last_logged_val = cur
+                        self.log("数值: 回合%d 行动值%d" % (cur[0], cur[1]))
+                if msg.get("status") == "声音事件" and msg.get("info"):
+                    self.log("声音: %s" % msg["info"], tag="sound")
+                if msg.get("status") == "模板学习" and msg.get("info"):
+                    self.log("事件: %s" % msg["info"], tag="event")
                 if msg.get("info") and msg.get("status") == "未识别到数字":
                     # 精简滚动日志：未定位到倒计时条是高频噪音（条浮动/遮挡常态），隐藏；
                     # 保留有条但提取失败/整区域识别异常的诊断信息
-                    if not msg["info"].startswith("未定位到倒计时条"):
+                    if not msg["info"].startswith("未定位到倒计时条") \
+                            and self._log_gate.allow_message(
+                                "unrecog", msg["info"], 5.0, changed=True):
                         self.log("未识别: %s" % msg["info"])
                 elif msg.get("status", "").startswith("丢弃"):
-                    self.log("%s (%s)" % (msg["status"], msg.get("info", "")),
+                    drop_note = ""
+                    if "行动值骤降" in msg["status"]:
+                        drop_note = "（疑似数字切换过渡帧，像素级缺位，防御正确）"
+                    self.log("%s (%s)%s" % (msg["status"], msg.get("info", ""), drop_note),
                              tag="drop")
                 elif ("突变确认" in msg.get("info", "") or "新对局" in msg.get("info", "")
                       or "骤降确认" in msg.get("info", "")

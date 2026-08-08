@@ -3,3 +3,5 @@ numpy
 pytesseract
 winocr
 opencv-python-headless
+comtypes
+scipy

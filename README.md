@@ -12,7 +12,7 @@
 
 **首次运行自动安装（联网）**：
 
-- Python 依赖：`pillow / numpy / pytesseract / winocr / opencv-python-headless`（即 `requirements.txt`，走阿里云镜像）
+- Python 依赖：`pillow / numpy / pytesseract / winocr / opencv-python-headless / comtypes / scipy`（即 `requirements.txt`，走阿里云镜像）
 - Tesseract OCR 引擎：自动下载（约 50MB，代理 `127.0.0.1:7890` 优先）并安装到 `%LOCALAPPDATA%\Programs\Tesseract-OCR`；静默安装失败时自动尝试 7-Zip 解包兜底
 
 **仓库自带（无需安装）**：
@@ -36,8 +36,9 @@
 - **双样式支持**：金色/红色两种敌人状态（六角图标颜色驱动同色掩码）
 - **完整性校验闸门**：数值范围、同回合递减、骤降（多位数→个位数）、归零回弹、低位拒绝、突变三帧确认（含抖动容差）、兜底重置等一套闸门，离谱结果直接丢弃，宁可不识别不误报
 - **自动提权**：start.bat 启动时自动申请管理员权限
-- **识别日志**：`logs/history_日期.csv`（时间/回合数/行动值/提醒/说明），值变化或提醒时存档画面到 `logs/frames/`（自动保留最近 500 张），GUI 滚动日志同步落盘 `logs/gui_日期.log`
+- **识别日志**：`logs/history_日期.csv`（时间/回合数/行动值/提醒/说明），值变化或提醒时存档画面到 `logs/frames/`（自动保留最近 500 张），GUI 滚动日志同步落盘 `logs/gui_日期.log`；日志采用门控模式——数值变化才记录轨迹，未识别同一原因 5 秒内不重复刷屏
 - **双按钮提醒**：弹窗可选「本局不再提醒」（新对局自动恢复）或「下次继续提醒」
+- **声音触发（可选）**：WASAPI 进程环回监听游戏音频，匹配预设音效模板（如回合结算/行动值归零提示音）触发事件日志——画面识别之外的独立通道（详见下方「声音触发」）
 
 ## 文件说明
 
@@ -45,8 +46,13 @@
 |---|---|
 | `start.bat` | 双击启动（自提权，首次自动装依赖） |
 | `starrail_monitor.py` | 主程序（GUI + 识别 + 校验 + 提醒） |
-| `template_matcher.py` | OpenCV 模板匹配识别器 |
+| `template_matcher.py` | OpenCV 模板匹配识别器（支持多数字变体模板） |
+| `template_learn.py` | 模板自学习（手动执行：`venv\Scripts\python.exe template_learn.py`；增量吸收存档样本+回放对比门禁，图形化展示新旧模板与识别率，只升不降） |
 | `rapid_recheck.py` | RapidOCR 低频复核（可选，默认关闭） |
+| `sound_trigger.py` | 声音触发模块（WASAPI 进程环回捕获 + FFT 互相关音效匹配，可选） |
+| `sound_sample_collector.py` | 音效样本采集工具（从游戏录音自动切分候选音效） |
+| `collect_sounds.bat` | 双击运行样本采集（把录音 wav 拖到文件上） |
+| `capture_test.bat` | 双击运行声音捕获自测（验证 WASAPI 进程环回，游戏开声时） |
 | `build_templates.py` | 从存档帧重新采集 0-9 数字模板（`venv\Scripts\python.exe build_templates.py`） |
 | `templates/digits/` | 0-9 数字模板文件（识别必需） |
 | `test_filter.py` | 合理性闸门回归测试（`venv\Scripts\python.exe test_filter.py`） |
@@ -80,9 +86,22 @@
 - **「未定位到倒计时条」**：区域框得不对（应框整列且包含倒计时条活动范围），或当前不在战斗界面
 - **窗口捕获黑屏/失败**：游戏被完全遮挡或移出屏幕时不渲染画面，任何工具都捕获不到；请保持窗口可见
 - **游戏窗口改了大小**：监测区域是相对窗口的坐标，改窗口大小后需重新框选
-- **误报/漏报**：日志中红色=丢弃原因，橙色=突变确认/校准等事件；结合 `logs/gui_日期.log` 与 CSV 排查
+- **误报/漏报**：日志中红色=丢弃原因，橙色=突变确认/校准等事件，蓝色=声音事件；结合 `logs/gui_日期.log` 与 CSV 排查。丢弃日志注明「疑似数字切换过渡帧」的是数字切换动画期间的信息丢失（像素级缺位），程序拒绝且不污染基线是预期防御
 - **数字模板失效**：游戏分辨率/字体变化后识别变差，重跑 `venv\Scripts\python.exe build_templates.py` 重新采集
 - **自检模式**：`venv\Scripts\python.exe starrail_monitor.py --selftest 截图.png`
+
+## 声音触发（可选功能）
+
+在画面识别之外增加一条独立通道：监听游戏进程的音频输出，匹配预设音效模板，触发时记录蓝色事件日志（如"声音: 行动值归零(分数0.85)"）。原理：WASAPI 进程环回（只捕获游戏进程的声音，Win10 19041+）+ 高通滤波 + FFT 互相关匹配。
+
+**首次配置步骤**：
+
+1. 用任意录音工具录制一段**游戏战斗音频**（含目标音效，如行动值归零/回合结算提示音，10-60 秒即可），保存为 wav。
+2. 双击 `collect_sounds.bat`，把录音 wav 拖到窗口上回车——程序自动切分候选音效片段并逐个播放，输入名称（如 `action_zero`）保存。
+3. 保存后模板在 `templates/sounds/<名称>.wav`。启动监控程序，勾选界面上的「声音触发(需音效样本)」再开始监测。
+4. 若监听不工作，先双击 `capture_test.bat` 自测捕获（游戏开声时运行，输出 `capture_test.wav` 试听确认能录到游戏声音）。
+
+**参数**：`config.json` 中 `sound_threshold`（默认 0.13，越低越灵敏）、`game_process`（默认 StarRail.exe，进程名不匹配时改这里）。
 
 ## 已知限制
 
