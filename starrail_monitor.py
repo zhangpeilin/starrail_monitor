@@ -1140,7 +1140,6 @@ class MonitorApp:
         except Exception:
             self.rapid = None
         self._init_sound()
-        self._init_battle_tracker()
         self.last_rapid_base = 0.0
         self.monitor_thread = None
         self.stop_event = threading.Event()
@@ -1155,6 +1154,8 @@ class MonitorApp:
         self._log_gate = LogGate()
         self._last_logged_val = None
         self._build_ui()
+        # 对局监测初始化（需在 _build_ui 之后，self.log 依赖 txt_log）
+        self._init_battle_tracker()
         self.root.after(100, self._poll_queue)
         if self.ocr.ok():
             self.log("OCR 引擎: %s (%s)" % (self.ocr.engine_name(),
