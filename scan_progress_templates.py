@@ -198,7 +198,8 @@ def main():
 
     frames = sorted(os.path.join(root, f)
                     for root, _d, fs in os.walk(FRAMES_DIR)
-                    for f in fs if "_progress_" in f)
+                    for f in fs if "_progress_" in f
+                    and os.sep + "old" + os.sep not in root)
     print("扫描进度帧: %d 张" % len(frames))
 
     added = 0
