@@ -1083,7 +1083,7 @@ class Recorder:
             files = []
             for root, _dirs, fs in os.walk(self.frames_dir):
                 for f in fs:
-                    if f.startswith("frame_"):
+                    if f.startswith("frame_") and "_progress_" not in f:
                         files.append(os.path.join(root, f))
             if len(files) > self.max_frames:
                 files.sort(key=os.path.getmtime)
@@ -1571,7 +1571,7 @@ class MonitorApp:
             if shot is None:
                 return False
             gray = np.array(shot.convert("L"), dtype=np.uint8)
-            events = self.battle.update(gray)
+            events = self.battle.update(gray, rgb=shot)
             for ev_type, msg in events:
                 if ev_type == "battle_start":
                     # 新对局：重置基线，直接接受新值
@@ -1584,6 +1584,8 @@ class MonitorApp:
                                         "info": "进度 %d%%" % msg})
                 elif ev_type == "stage":
                     self.msg_queue.put({"status": "关卡", "info": msg})
+                elif ev_type == "progress_warn":
+                    self.msg_queue.put({"status": "进度告警", "info": msg})
             return bool(events)
         except Exception:
             return False
@@ -1914,6 +1916,8 @@ class MonitorApp:
                     self.log("进度: %s" % msg["info"])
                 if msg.get("status") == "关卡" and msg.get("info"):
                     self.log("关卡: %s" % msg["info"], tag="event")
+                if msg.get("status") == "进度告警" and msg.get("info"):
+                    self.log("进度告警: %s" % msg["info"], tag="drop")
                 if msg.get("status") == "模板学习" and msg.get("info"):
                     self.log("事件: %s" % msg["info"], tag="event")
                 if msg.get("info") and msg.get("status") == "未识别到数字":

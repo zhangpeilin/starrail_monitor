@@ -262,8 +262,9 @@ class BattleTracker:
         return best
 
     # ---------------- 状态机 ----------------
-    def update(self, gray):
-        """低频调用（约 1s/次）。返回事件列表 [(类型, 说明), ...]"""
+    def update(self, gray, rgb=None):
+        """低频调用（约 1s/次）。返回事件列表 [(类型, 说明), ...]
+        rgb：彩色帧（可选），进度变化时用于存档进度条带截图"""
         events = []
         with self._lock:
             band = self.find_band(gray)
@@ -275,7 +276,8 @@ class BattleTracker:
                     self.state = "BATTLE"
                     self.battle_start = datetime.now()
                     self.battle_start_ts = __import__("time").time()
-                    self.last_progress = self.read_progress(gray, band[0], band[1])
+                    self.last_progress = None   # 新对局进度归零，重置单调基线
+                    self._read_band_values(gray, band, rgb)
                     events.append(("battle_start", "对局开始"))
             elif self.state == "BATTLE":
                 if title is not None:
@@ -286,21 +288,25 @@ class BattleTracker:
                         self.last_progress if self.last_progress is not None else "?")))
                     self.state = "SETTLEMENT"
                 else:
-                    p = self.read_progress(gray, band[0], band[1], band[2]) if band else None
-                    if p is not None:
-                        self.last_progress = p
-                        events.append(("progress", p))
+                    self._read_band_values(gray, band, rgb)
+                    if self._stage_changed:
+                        events.append(("stage", "关卡 %d-%d" % self.last_stage))
+                    if getattr(self, "_progress_warn", None):
+                        events.append(("progress_warn", self._progress_warn))
+                    elif self.last_progress is not None:
+                        events.append(("progress", self.last_progress))
             elif self.state == "SETTLEMENT":
                 if in_battle_ui and not title:
                     # 结算页消失、进度条带重现 → 新对局
                     self.state = "BATTLE"
                     self.battle_start = datetime.now()
                     self.battle_start_ts = __import__("time").time()
-                    self.last_progress = self.read_progress(gray, band[0], band[1])
+                    self.last_progress = None
+                    self._read_band_values(gray, band, rgb)
                     events.append(("battle_start", "对局开始"))
         return events
 
-    def _read_band_values(self, gray, band):
+    def _read_band_values(self, gray, band, rgb=None):
         """读取条带数值：关卡（1-3）+ 进度百分比；关卡变化置 _stage_changed"""
         if band is None:
             return
@@ -312,7 +318,36 @@ class BattleTracker:
             self.last_stage = stage
         p = self.read_progress(gray, band[0], band[1], band[2])
         if p is not None:
+            # 单调性校验：对局内进度只增不减，回退=识别错误（如 50→5），
+            # 保持上次值并记录告警（真实回退仅在新对局，已在 battle_start 重置）
+            if self.last_progress is not None and p < self.last_progress:
+                self._progress_warn = "进度回退 %d→%d 已忽略（识别错误）" % (
+                    self.last_progress, p)
+                return
+            self._progress_warn = None
+            if p != self.last_progress:
+                self._save_progress_frame(rgb, band, p)
             self.last_progress = p
+
+    def _save_progress_frame(self, rgb, band, progress):
+        """进度条带截图存档（logs/frames/日期/，文件名带 _progress_ 标记，
+        prune 清理时豁免 = 调试存档无上限）"""
+        if rgb is None or band is None:
+            return
+        try:
+            bx0, by0, bx1, by1 = band[0]
+            pad = 12
+            crop = rgb.crop((max(0, bx0 - pad), max(0, by0 - pad),
+                             min(rgb.width - 1, bx1 + pad),
+                             min(rgb.height - 1, by1 + pad)))
+            now = datetime.now()
+            sub = os.path.join(LOGS_DIR, "frames", now.strftime("%Y-%m-%d"))
+            os.makedirs(sub, exist_ok=True)
+            name = "frame_%s_progress_a%d.png" % (
+                now.strftime("%Y%m%d_%H%M%S_%f")[:-3], progress)
+            crop.save(os.path.join(sub, name))
+        except Exception:
+            pass
 
     def force_reset(self):
         """停止监测/手动停止时清状态"""
