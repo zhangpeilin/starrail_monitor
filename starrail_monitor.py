@@ -1581,6 +1581,8 @@ class MonitorApp:
                 elif ev_type == "progress":
                     self.msg_queue.put({"status": "进度",
                                         "info": "进度 %d%%" % msg})
+                elif ev_type == "stage":
+                    self.msg_queue.put({"status": "关卡", "info": msg})
             return bool(events)
         except Exception:
             return False
@@ -1909,6 +1911,8 @@ class MonitorApp:
                     self.log("对局结束：%s" % msg["info"], tag="event")
                 if msg.get("status") == "进度" and msg.get("info"):
                     self.log("进度: %s" % msg["info"])
+                if msg.get("status") == "关卡" and msg.get("info"):
+                    self.log("关卡: %s" % msg["info"], tag="event")
                 if msg.get("status") == "模板学习" and msg.get("info"):
                     self.log("事件: %s" % msg["info"], tag="event")
                 if msg.get("info") and msg.get("status") == "未识别到数字":

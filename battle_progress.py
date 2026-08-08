@@ -118,7 +118,17 @@ class BattleTracker:
                   hx0 + heart[1] + heart[3], y0 + heart[2] + heart[4])
         else:
             hw = None
-        return ((x0, y0, x1, y1), sw, hw)
+        # 精准条带：剑左缘 → 进度条右缘（检测橙色填充段；无则按固定间隙序列）
+        band_x1 = sw[0] + int(W * 0.11)
+        try:
+            orange = (gray[sw[1]:sw[3], sw[0]:min(x1, sw[0] + int(W * 0.13))] > 0)
+            # 橙色检测用原图颜色（此处灰度近似，改由调用方传 RGB；退化用固定宽度）
+        except Exception:
+            pass
+        # y 收窄到剑图标 y 带（±2px 边距），避免把条带上下背景卷进区域
+        by0 = max(0, sw[1] - 2)
+        by1 = min(H - 1, sw[3] + 2)
+        return ((sw[0], by0, band_x1, by1), sw, hw)
 
     def read_progress(self, gray, band_rect, sword_rect, heart_rect=None):
         """进度数字提取：剑图标右缘 +固定窗口 → 白名单 OCR → 取 ≤100 数字"""
@@ -129,8 +139,10 @@ class BattleTracker:
             return None
         bx0, by0, bx1, by1 = band_rect
         sx1 = sword_rect[2]
-        rx0 = sx1 + max(20, int(W * 0.023))
-        rx1 = min(bx1, sx1 + max(90, int(W * 0.06)))
+        # 固定间隙序列（标定自 1922 窗口）：剑右缘+45px 起为进度区
+        # （避开左侧 "1-3" 的 "3" 在 +39px 结束）
+        rx0 = sx1 + max(40, int(W * 0.023))
+        rx1 = min(bx1, sx1 + max(100, int(W * 0.055)))
         ry0, ry1 = by0, by1
         if rx1 <= rx0 or ry1 <= ry0:
             return None
@@ -154,6 +166,45 @@ class BattleTracker:
             if v <= 100:
                 return v
         return None
+
+    def read_stage(self, gray, sword_rect):
+        """关卡识别（"1-3" → 1层3关）：剑右缘+4px 起固定窗口 → OCR → (层, 关)"""
+        if gray is None:
+            return None
+        H, W = gray.shape
+        if sword_rect is None:
+            return None
+        sx1 = sword_rect[2]
+        rx0 = sx1 + max(2, int(W * 0.002))
+        rx1 = sx1 + max(38, int(W * 0.021))
+        ry0, ry1 = sword_rect[1], sword_rect[3]
+        if rx1 <= rx0 or ry1 <= ry0:
+            return None
+        sub = gray[ry0:ry1, rx0:rx1]
+        mask = (sub > 150).astype(np.uint8) * 255
+        if int((mask > 0).sum()) < 8:
+            return None
+        crop = Image.fromarray(255 - mask).resize(
+            (mask.shape[1] * 6, mask.shape[0] * 6), Image.LANCZOS)
+        text = self._ocr_text(crop)
+        m = re.search(r"(\d+)\s*[-–—]\s*(\d+)", text)
+        if m:
+            return (int(m.group(1)), int(m.group(2)))
+        return None
+
+    @staticmethod
+    def _ocr_text(crop):
+        """全字符 OCR（读 1-3 关卡格式）"""
+        try:
+            import pytesseract
+            if not pytesseract.pytesseract.tesseract_cmd or                     not os.path.isfile(pytesseract.pytesseract.tesseract_cmd):
+                pytesseract.pytesseract.tesseract_cmd = os.path.join(
+                    os.environ.get("LOCALAPPDATA", ""),
+                    "Programs", "Tesseract-OCR", "tesseract.exe")
+            return pytesseract.image_to_string(
+                crop, config="--psm 7").strip()
+        except Exception:
+            return ""
 
     @staticmethod
     def _ocr_digits(crop):
@@ -248,6 +299,20 @@ class BattleTracker:
                     self.last_progress = self.read_progress(gray, band[0], band[1])
                     events.append(("battle_start", "对局开始"))
         return events
+
+    def _read_band_values(self, gray, band):
+        """读取条带数值：关卡（1-3）+ 进度百分比；关卡变化置 _stage_changed"""
+        if band is None:
+            return
+        stage = self.read_stage(gray, band[1])
+        self._stage_changed = False
+        if stage is not None:
+            if stage != getattr(self, "last_stage", None):
+                self._stage_changed = True
+            self.last_stage = stage
+        p = self.read_progress(gray, band[0], band[1], band[2])
+        if p is not None:
+            self.last_progress = p
 
     def force_reset(self):
         """停止监测/手动停止时清状态"""
