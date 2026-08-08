@@ -342,6 +342,9 @@ class Extractor:
                 ax1 = max(c[2] for c in acts)
                 ay0 = min(c[1] for c in acts)
                 ay1 = max(c[3] for c in acts)
+                # 行动值区域 = 白色组件聚类结果。条框右边界已由
+                # locate_bar 的黑底纹修正兜底（黑底不随数字淡出），
+                # 过渡帧残影数字的组件在条框完整后自然存在，无需再扩展。
                 action_img = mask_to_image(white, ax0, ay0, ax1, ay1)
                 info.append("行动值区域(%d,%d)-(%d,%d)" % (ax0, ay0, ax1, ay1))
                 # 回合数：沙漏右侧、行动值左侧、垂直与行动值有交叠的同色组件
@@ -551,6 +554,45 @@ class ValueFilter:
 # --------------------------------------------------------------------------
 # 列内动态定位倒计时条
 # --------------------------------------------------------------------------
+def find_action_black_right(gray, hyc, x_start, W, H, dark_thr=130,
+                            max_gap=3, min_w=6):
+    """行动值黑底纹右缘检测（借鉴黑底白字 UI 特征：黑底不随数字淡出）
+
+    行动值数字为黑底白字，黑底矩形在过渡帧（数字淡出）时依然完整，
+    而白色组件会消失导致条框收缩。本函数在 y 带 hyc±12 内做列平均
+    亮度剖面，从 x_start 向右找暗段（允许 ≤max_gap 像素的亮隙合并），
+    返回最右侧暗段 (左缘, 右缘) 或 None。
+    """
+    y0, y1 = max(0, int(hyc - 12)), min(H - 1, int(hyc + 12))
+    if y1 <= y0 or x_start >= W:
+        return None
+    band = gray[y0:y1 + 1, x_start:].mean(axis=0)
+    dark = band < dark_thr
+    segs = []
+    cur = None
+    gap = 0
+    for i, v in enumerate(dark):
+        if v:
+            if cur is None:
+                cur = [i, i]
+            else:
+                cur[1] = i
+            gap = 0
+        elif cur is not None:
+            gap += 1
+            if gap > max_gap:
+                if cur[1] - cur[0] + 1 >= min_w:
+                    segs.append(tuple(cur))
+                cur = None
+                gap = 0
+    if cur is not None and cur[1] - cur[0] + 1 >= min_w:
+        segs.append(tuple(cur))
+    if not segs:
+        return None
+    s, e = segs[-1]
+    return (x_start + s, x_start + e)
+
+
 def locate_bar(img):
     """
     在整列区域中定位倒计时条。
@@ -613,8 +655,16 @@ def locate_bar(img):
             continue
         score = c[4] + sum(d[4] for d in digs) + sum(w[4] for w in acts)
         if best is None or score > best[0]:
+            # 行动值黑底纹扩展右边界：黑底不随数字淡出，
+            # 过渡帧白色组件收缩时防止条框切掉残影数字（如 54 只剩 5）
+            gray_a = (r * 0.299 + g * 0.587 + b * 0.114)
+            br = find_action_black_right(gray_a, (cy0 + cy1) / 2.0,
+                                         c[2] + 15, W, H)
+            act_r = max(w[2] for w in acts)
+            if br:
+                act_r = max(act_r, br[1] + 4)
             x0 = min(c[0], min(d[0] for d in digs), min(w[0] for w in acts))
-            x1 = max(c[2], dmax, max(w[2] for w in acts))
+            x1 = max(c[2], dmax, act_r)
             y0 = min(c[1], min(d[1] for d in digs), min(w[1] for w in acts))
             y1 = max(c[3], max(d[3] for d in digs), max(w[3] for w in acts))
             best = (score, x0, y0, x1, y1)
