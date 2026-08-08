@@ -34,7 +34,7 @@ BAND_Y0, BAND_Y1 = 0.02, 0.10
 TITLE_X0, TITLE_X1 = 0.4318, 0.5671
 TITLE_Y0, TITLE_Y1 = 0.2365, 0.2922
 
-SWORD_THRESHOLD = 0.45      # 剑图标匹配阈值（细线图标，NCC 偏低）
+SWORD_THRESHOLD = 0.75      # 剑图标匹配阈值（UI 虚化过渡帧分数 0.5-0.7，正常 0.94+）
 TITLE_THRESHOLD = 0.55      # 标题匹配阈值
 PROGRESS_OCR_MIN = 0        # 进度下限
 
