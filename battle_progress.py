@@ -218,7 +218,12 @@ class BattleTracker:
                 v = v * 10 + d
             if v <= 100:
                 return v
-        # 兜底：整窗口 OCR（0 断裂等多段场景，OCR 对 0 稳定）
+        # 断裂模式防御：组件 ≥2 且模板全失败 = 断裂数字（0/8 渲染断裂，
+        # 段形态与模板差大），整窗 OCR 对断裂形态不稳定（同一帧读 1/0 随机，
+        # 曾致 0→1 误读被接受后连环告警）→ 拒绝识别，保持上次值
+        if len(merged) >= 2:
+            return None
+        # 兜底：整窗口 OCR（单数字完整形态场景）
         crop = Image.fromarray(255 - (sub > 150).astype(np.uint8) * 255).resize(
             (mask.shape[1] * 6, mask.shape[0] * 6), Image.LANCZOS)
         text = self._ocr_digits(crop)
