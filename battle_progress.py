@@ -259,8 +259,15 @@ class BattleTracker:
                     w = max(r.shape[1], tpl.shape[1])
                     c1 = np.zeros((16, w), np.uint8)
                     c2 = np.zeros((16, w), np.uint8)
-                    c1[:r.shape[0], :r.shape[1]] = r
-                    c2[:tpl.shape[0], :tpl.shape[1]] = tpl
+                    if r.shape[1] > tpl.shape[1]:
+                        # 段比模板宽（左界多出 1px 抗锯齿残影，如 9 宽体变体）：
+                        # 左对齐会把整列笔画推错位，MAE 从 0 飙到 67 超阈值；
+                        # 右对齐让残影列越界、真笔画与模板重合
+                        c1[:r.shape[0], w - r.shape[1]:] = r
+                        c2[:tpl.shape[0], w - tpl.shape[1]:] = tpl
+                    else:
+                        c1[:r.shape[0], :r.shape[1]] = r
+                        c2[:tpl.shape[0], :tpl.shape[1]] = tpl
                     diff = float(np.abs(c1.astype(int) - c2.astype(int)).mean())
                     best_for_d = min(best_for_d, diff)
                 d_min[d] = best_for_d
