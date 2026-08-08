@@ -402,6 +402,7 @@ class BattleTracker:
                     self.battle_start = datetime.now()
                     self.battle_start_ts = __import__("time").time()
                     self.last_progress = None   # 新对局进度归零，重置单调基线
+                    self._progress_warn = None
                     self._new_battle_ts = self.battle_start_ts
                     self._read_band_values(gray, band, rgb)
                     events.append(("battle_start", "对局开始"))
@@ -428,6 +429,7 @@ class BattleTracker:
                     self.battle_start = datetime.now()
                     self.battle_start_ts = __import__("time").time()
                     self.last_progress = None
+                    self._progress_warn = None
                     self._new_battle_ts = self.battle_start_ts
                     self._read_band_values(gray, band, rgb)
                     events.append(("battle_start", "对局开始"))
