@@ -70,11 +70,13 @@ def main():
         print("未找到存档帧目录", FRAMES)
         return 1
     ocr = OcrEngine()
-    files = sorted(f for f in os.listdir(FRAMES) if f.startswith("frame_"))
+    files = sorted(os.path.join(root, f)
+                   for root, _dirs, fs in os.walk(FRAMES)
+                   for f in fs if f.startswith("frame_"))
     samples = {str(d): [] for d in range(10)}
     n_ok = 0
     for f in files:
-        img = Image.open(os.path.join(FRAMES, f)).convert("RGB")
+        img = Image.open(f).convert("RGB")
         bar = locate_bar(img)
         if bar is None:
             continue

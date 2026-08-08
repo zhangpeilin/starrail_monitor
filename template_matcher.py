@@ -47,7 +47,8 @@ class TemplateMatcher:
         return (sub > 127).astype(np.uint8) * 255
 
     def _load(self, template_dir):
-        # 多样本变体优先：{d}_0.png, {d}_1.png...；无变体时回退单模板 {d}.png
+        # 多样本变体优先：{d}_0.png, {d}_1.png...；
+        # 变体存在时旧单模板 {d}.png 一并保留（旧模板+新变体并存，覆盖多形态）
         for d in range(10):
             variants = []
             i = 0
@@ -59,7 +60,13 @@ class TemplateMatcher:
                 if t is not None:
                     variants.append(t)
                 i += 1
-            if not variants:
+            if variants:
+                p = os.path.join(template_dir, "%d.png" % d)
+                if os.path.isfile(p):
+                    t = self._norm_one(p)
+                    if t is not None:
+                        variants.insert(0, t)   # 旧单模板放最前（默认形态优先）
+            else:
                 p = os.path.join(template_dir, "%d.png" % d)
                 if os.path.isfile(p):
                     t = self._norm_one(p)
@@ -147,11 +154,22 @@ class TemplateMatcher:
         m = np.asarray(mask)
         if m.ndim == 3:
             m = m[..., 0]
+        subs = self._split_digits(m)
+        if not subs:
+            return []
+        # 噪声碎片过滤（修复：碎片段导致整体失败，如 133543 帧 13x5 碎片）
+        max_area = max(int((s > 0).sum()) for s in subs)
         digits = []
-        for sub in self._split_digits(m):
+        for sub in subs:
+            area = int((sub > 0).sum())
+            if area < max(20, max_area * 0.12):
+                continue                       # 面积过小的噪声碎片 → 丢弃
+            h = sub.shape[0]
+            if h > 0 and round(sub.shape[1] * self.height / h) < 4:
+                continue                       # 极窄竖笔碎片（断裂数字残段）→ 丢弃
             r = self._match_one(sub)
             if r is None:
-                return []          # 任一数字失败 → 整体放弃（宁缺毋滥）
+                return []                      # 任一数字失败 → 整体放弃（宁缺毋滥）
             digits.append(str(r[0]))
         return ["".join(digits)] if digits else []
 

@@ -310,18 +310,19 @@ def learn_once(script_dir=None, force=False):
     if not os.path.isdir(frames_dir):
         return None
     state = _load_state()
-    # 新增接受帧（文件名时间戳 > last_ts）
-    all_frames = sorted(f for f in os.listdir(frames_dir)
-                        if f.startswith("frame_") and "_drop_" not in f)
+    # 新增接受帧（文件名时间戳 > last_ts；递归扫描按日期子目录）
+    all_frames = sorted(os.path.join(root, f)
+                        for root, _dirs, fs in os.walk(frames_dir)
+                        for f in fs if f.startswith("frame_") and "_drop_" not in f)
     new_frames = []
-    for fn in all_frames:
-        ts = _frame_ts(fn)
+    for fp in all_frames:
+        ts = _frame_ts(os.path.basename(fp))
         if ts and ts > state.get("last_ts", ""):
-            new_frames.append(os.path.join(frames_dir, fn))
+            new_frames.append(fp)
     if not force and len(new_frames) < MIN_NEW:
         return None
     if force:
-        new_frames = [os.path.join(frames_dir, f) for f in all_frames]
+        new_frames = list(all_frames)
         for d in range(10):
             dd = os.path.join(SAMPLE_DIR, str(d))
             if os.path.isdir(dd):
@@ -358,7 +359,7 @@ def learn_once(script_dir=None, force=False):
                 "samples": {d: len(pool_cache[d]) for d in range(10)}}
 
     # 回放门禁：新旧模板对比（接受帧全量）
-    test_frames = [os.path.join(frames_dir, f) for f in all_frames]
+    test_frames = all_frames
     old_ok, old_total = _replay_accuracy(test_frames, old_matcher, ocr, sample=1)
     tmp_dir = tempfile.mkdtemp(prefix="tmpl_")
     try:

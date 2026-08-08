@@ -906,7 +906,7 @@ DEFAULT_CONFIG = {
     "cooldown_s": 10,
     "gamma": 1.0,                    # 图像亮度校正（HDR 过曝时可调低）
     "save_frames": True,             # 数字变化/提醒时保存识别画面
-    "max_frames": 500,               # 画面存档上限（超出自动删最旧）
+    "max_frames": 10000,             # 画面存档上限（按日期分文件夹，超出自动删最旧）
     "log_history": True,             # 记录识别历史 CSV
     "max_turn": 99,                  # 回合数合理上限（超出=识别错误丢弃）
     "max_action": 100,               # 行动值合理上限（超出=识别错误丢弃）
@@ -982,11 +982,11 @@ def append_gui_log(ts, msg):
 class Recorder:
     """监控记录器：
       - logs/history_YYYY-MM-DD.csv  每次识别成功一行（时间,回合数,行动值,提醒,说明）
-      - logs/frames/                 数字变化或触发提醒时的列区域画面（自动保留最近 N 张）
+      - logs/frames/YYYY-MM-DD/      数字变化或触发提醒时的列区域画面（按日期分文件夹，总量保留最近 N 张）
       - logs/gui_YYYY-MM-DD.log      程序界面滚动日志（未识别/丢弃/事件等）完整落盘
     """
 
-    def __init__(self, base_dir, max_frames=500):
+    def __init__(self, base_dir, max_frames=10000):
         self.logs_dir = os.path.join(base_dir, "logs")
         self.frames_dir = os.path.join(self.logs_dir, "frames")
         os.makedirs(self.frames_dir, exist_ok=True)
@@ -994,6 +994,35 @@ class Recorder:
         self._last = None          # 上次 (turn, action)，用于变化检测
         self._csv_path = None
         self._lock = threading.Lock()
+        self._migrate_legacy_frames()
+
+    def _migrate_legacy_frames(self):
+        """旧版帧迁移：logs/frames/ 根目录的 frame_*.png → 按文件名日期子目录"""
+        try:
+            for f in os.listdir(self.frames_dir):
+                p = os.path.join(self.frames_dir, f)
+                if not (f.startswith("frame_") and os.path.isfile(p)):
+                    continue
+                ts = f[6:14]   # frame_YYYYMMDD_...
+                if len(ts) == 8 and ts.isdigit():
+                    d = "%s-%s-%s" % (ts[:4], ts[4:6], ts[6:8])
+                    sub = os.path.join(self.frames_dir, d)
+                    os.makedirs(sub, exist_ok=True)
+                    try:
+                        shutil.move(p, os.path.join(sub, f))
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+    def _date_dir(self):
+        d = datetime.now().strftime("%Y-%m-%d")
+        p = os.path.join(self.frames_dir, d)
+        try:
+            os.makedirs(p, exist_ok=True)
+        except Exception:
+            pass
+        return p
 
     def _csv(self):
         today = datetime.now().strftime("%Y-%m-%d")
@@ -1024,7 +1053,7 @@ class Recorder:
                 try:
                     name = "frame_%s_t%d_a%d.png" % (
                         now.strftime("%Y%m%d_%H%M%S_%f")[:-3], turn, action)
-                    col_img.save(os.path.join(self.frames_dir, name))
+                    col_img.save(os.path.join(self._date_dir(), name))
                 except Exception:
                     pass
 
@@ -1038,7 +1067,7 @@ class Recorder:
                 tag = "".join(ch for ch in reason[:8] if ch.isalnum())
                 name = "frame_%s_t%d_a%d_drop_%s.png" % (
                     now.strftime("%Y%m%d_%H%M%S_%f")[:-3], turn, action, tag)
-                col_img.save(os.path.join(self.frames_dir, name))
+                col_img.save(os.path.join(self._date_dir(), name))
             except Exception:
                 pass
             # 丢弃帧不经过 record_count，自行定期清理超限帧
@@ -1047,10 +1076,13 @@ class Recorder:
                 self.prune()
 
     def prune(self):
-        """删除超出上限的最旧帧文件"""
+        """删除超出上限的最旧帧文件（递归所有日期子目录 + 根目录旧文件）"""
         try:
-            files = [os.path.join(self.frames_dir, f)
-                     for f in os.listdir(self.frames_dir) if f.startswith("frame_")]
+            files = []
+            for root, _dirs, fs in os.walk(self.frames_dir):
+                for f in fs:
+                    if f.startswith("frame_"):
+                        files.append(os.path.join(root, f))
             if len(files) > self.max_frames:
                 files.sort(key=os.path.getmtime)
                 for f in files[:len(files) - self.max_frames]:
