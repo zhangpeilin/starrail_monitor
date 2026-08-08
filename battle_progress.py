@@ -236,8 +236,10 @@ class BattleTracker:
             order = sorted(d_min.items(), key=lambda kv: kv[1])
             best_d, best_diff = order[0]
             second_diff = order[1][1] if len(order) > 1 else 1e9
-            # 阈值：正确模板差 <25 且与次优数字差距显著
-            if best_diff < 25 and best_diff < second_diff * 0.6:
+            # 阈值：正确模板差 <45（渲染变体差异可达 38）且与次优差距显著
+            if best_diff < 45 and best_diff < second_diff * 0.6:
+                if best_diff < 20:
+                    self._maybe_add_variant(r, best_d)  # 仅高置信时自动积累形态
                 return best_d
         # OCR 兜底（0/4/5/6/9 等缺模板数字）
         crop = Image.fromarray((255 - seg.astype(np.uint8) * 255)).resize(
@@ -248,7 +250,8 @@ class BattleTracker:
         return None
 
     def read_stage(self, gray, sword_rect):
-        """关卡识别（"1-3" → 1层3关）：剑右缘+4px 起固定窗口 → OCR → (层, 关)"""
+        """关卡识别（"1-3" → 1层3关）：剑右缘+固定窗口 → 组件定位 →
+        数字模板匹配（- 为矮横条跳过）→ (层, 关)"""
         if gray is None:
             return None
         H, W = gray.shape
@@ -257,19 +260,35 @@ class BattleTracker:
         sx1 = sword_rect[2]
         rx0 = sx1 + max(2, int(W * 0.002))
         rx1 = sx1 + max(38, int(W * 0.021))
-        ry0, ry1 = sword_rect[1], sword_rect[3]
-        if rx1 <= rx0 or ry1 <= ry0:
+        ry0 = ry1 = None
+        if sword_rect[1] is not None:
+            ry0, ry1 = sword_rect[1], sword_rect[3]
+        if rx1 <= rx0 or ry1 is None or ry0 is None or ry1 <= ry0:
             return None
         sub = gray[ry0:ry1, rx0:rx1]
-        mask = (sub > 150).astype(np.uint8) * 255
-        if int((mask > 0).sum()) < 8:
+        mask = sub > 180
+        if int(mask.sum()) < 8:
             return None
-        crop = Image.fromarray(255 - mask).resize(
-            (mask.shape[1] * 6, mask.shape[0] * 6), Image.LANCZOS)
-        text = self._ocr_text(crop)
-        m = re.search(r"(\d+)\s*[-–—]\s*(\d+)", text)
-        if m:
-            return (int(m.group(1)), int(m.group(2)))
+        import starrail_monitor as _sm
+        comps = [c for c in _sm.components(mask) if c[4] >= 15]
+        comps.sort(key=lambda c: c[0])
+        if not comps:
+            return None
+        max_h = max(c[3] - c[1] + 1 for c in comps)
+        digits = []
+        for c in comps:
+            h = c[3] - c[1] + 1
+            if h < max_h * 0.6:
+                continue                       # "-" 矮横条跳过
+            seg = mask[c[1]:c[3] + 1, c[0]:c[2] + 1].astype(np.uint8) * 255
+            d = self._match_progress_digit(seg)
+            if d is None:
+                return None
+            digits.append(d)
+        if len(digits) == 2:
+            return (digits[0], digits[1])
+        if len(digits) == 1:
+            return (digits[0], None)
         return None
 
     @staticmethod
@@ -397,6 +416,8 @@ class BattleTracker:
                 self._stage_changed = True
             self.last_stage = stage
         p = self.read_progress(gray, band[0], band[1], band[2])
+        # 全量存档：每 tick 保存进度条带帧（正常+异常，供事后排查/模板采集）
+        self._save_progress_frame(rgb, band, p)
         if p is not None:
             # 单调性校验：对局内进度只增不减，回退=识别错误（如 50→5），
             # 保持上次值并记录告警（真实回退仅在新对局，已在 battle_start 重置）
@@ -405,13 +426,39 @@ class BattleTracker:
                     self.last_progress, p)
                 return
             self._progress_warn = None
-            if p != self.last_progress:
-                self._save_progress_frame(rgb, band, p)
             self.last_progress = p
+
+    def _maybe_add_variant(self, seg_norm, d):
+        """自动变体采集：匹配成功的数字段与现有变体差异大时存入模板库
+        （templates/battle/digits/{d}_{i}.png，上限 8 张/数字），
+        覆盖不同帧的渲染形态差异（同一数字跨帧像素差可达 38）"""
+        m = self._progress_matcher
+        if m is None:
+            return
+        tpls = m.templates.get(d, [])
+        for tpl in tpls:
+            w = max(seg_norm.shape[1], tpl.shape[1])
+            c1 = np.zeros((16, w), np.uint8)
+            c2 = np.zeros((16, w), np.uint8)
+            c1[:seg_norm.shape[0], :seg_norm.shape[1]] = seg_norm
+            c2[:tpl.shape[0], :tpl.shape[1]] = tpl
+            if float(np.abs(c1.astype(int) - c2.astype(int)).mean()) < 20:
+                return                    # 已有相似变体
+        if len(tpls) >= 8:
+            return                        # 每数字上限
+        try:
+            w = seg_norm.shape[1]
+            canvas = np.zeros((16, w), np.uint8)
+            canvas[:seg_norm.shape[0], :seg_norm.shape[1]] = seg_norm
+            Image.fromarray(canvas, "L").save(
+                os.path.join(TPL_DIR, "digits", "%d_%d.png" % (d, len(tpls))))
+            m.templates.setdefault(d, []).append(seg_norm.copy())
+        except Exception:
+            pass
 
     def _save_progress_frame(self, rgb, band, progress):
         """进度条带截图存档（logs/frames/日期/，文件名带 _progress_ 标记，
-        prune 清理时豁免 = 调试存档无上限）"""
+        prune 清理时豁免 = 调试存档无上限）；识别值可为 None（未识别帧也存）"""
         if rgb is None or band is None:
             return
         try:
@@ -423,8 +470,12 @@ class BattleTracker:
             now = datetime.now()
             sub = os.path.join(LOGS_DIR, "frames", now.strftime("%Y-%m-%d"))
             os.makedirs(sub, exist_ok=True)
-            name = "frame_%s_progress_a%d.png" % (
-                now.strftime("%Y%m%d_%H%M%S_%f")[:-3], progress)
+            if progress is None:
+                name = "frame_%s_progress_unk.png" % (
+                    now.strftime("%Y%m%d_%H%M%S_%f")[:-3])
+            else:
+                name = "frame_%s_progress_a%d.png" % (
+                    now.strftime("%Y%m%d_%H%M%S_%f")[:-3], progress)
             crop.save(os.path.join(sub, name))
         except Exception:
             pass

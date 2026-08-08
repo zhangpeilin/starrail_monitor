@@ -906,7 +906,7 @@ DEFAULT_CONFIG = {
     "cooldown_s": 10,
     "gamma": 1.0,                    # 图像亮度校正（HDR 过曝时可调低）
     "save_frames": True,             # 数字变化/提醒时保存识别画面
-    "max_frames": 10000,             # 画面存档上限（按日期分文件夹，超出自动删最旧）
+    "max_frames": 0,                 # 画面存档上限（0=无上限全量存档；>0 时超出自动删最旧）
     "log_history": True,             # 记录识别历史 CSV
     "max_turn": 99,                  # 回合数合理上限（超出=识别错误丢弃）
     "max_action": 100,               # 行动值合理上限（超出=识别错误丢弃）
@@ -1051,7 +1051,9 @@ class Recorder:
                     pass
             changed = (self._last is None or self._last != (turn, action))
             self._last = (turn, action)
-            if save_enabled and col_img is not None and (changed or alert):
+            # 全量存档：每帧保存行动值列区域图（正常+异常，调试用），
+            # 上限由 max_frames 控制（0 = 无上限）
+            if save_enabled and col_img is not None:
                 try:
                     name = "frame_%s_t%d_a%d.png" % (
                         now.strftime("%Y%m%d_%H%M%S_%f")[:-3], turn, action)
@@ -1085,7 +1087,7 @@ class Recorder:
                 for f in fs:
                     if f.startswith("frame_") and "_progress_" not in f:
                         files.append(os.path.join(root, f))
-            if len(files) > self.max_frames:
+            if self.max_frames > 0 and len(files) > self.max_frames:
                 files.sort(key=os.path.getmtime)
                 for f in files[:len(files) - self.max_frames]:
                     try:
