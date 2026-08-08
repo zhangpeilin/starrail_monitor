@@ -348,9 +348,21 @@ class Extractor:
                 action_img = mask_to_image(white, ax0, ay0, ax1, ay1)
                 info.append("行动值区域(%d,%d)-(%d,%d)" % (ax0, ay0, ax1, ay1))
                 # 回合数：沙漏右侧、行动值左侧、垂直与行动值有交叠的同色组件
-                turns = [c for c in yc if c[0] > hourglass[2] and c[2] < ax0
-                         and c[3] > ay0 - 5 and c[1] < ay1 + 5]
-                if turns:
+                turn_cands = [c for c in yc if c[0] > hourglass[2] and c[2] < ax0
+                              and c[3] > ay0 - 5 and c[1] < ay1 + 5]
+                if turn_cands:
+                    # 间隔断簇取最左簇（方案A）：沙漏→回合数字间隔 ~5px，
+                    # 回合数字→右侧杂物（装饰/碎片）间隔 ≥9px——簇间隙 >8px 断开，
+                    # 只取最左簇（回合数字本体），排除右侧碎片（如 133543 帧
+                    # x94-96 黄色碎片曾被卷入导致 OCR 把 0 读成 1）
+                    turn_cands.sort(key=lambda c: c[0])
+                    tcl = []
+                    for c in turn_cands:
+                        if tcl and c[0] - tcl[-1][-1][2] <= 8:
+                            tcl[-1].append(c)
+                        else:
+                            tcl.append([c])
+                    turns = tcl[0]
                     tx0 = min(c[0] for c in turns)
                     tx1 = max(c[2] for c in turns)
                     ty0 = min(c[1] for c in turns)
