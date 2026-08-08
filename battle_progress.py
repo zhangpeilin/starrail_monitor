@@ -52,6 +52,7 @@ class BattleTracker:
         self.last_progress = None    # 最近一次进度（0-100）
         self._sword = self._load("sword.png")
         self._yicon = self._load("yicon.png")   # 新UI锚点（Y形图标，与剑形并列二选一）
+        self._bossicon = self._load("bossicon.png")  # BOSS战锚点（翼状菱形，与旧存档帧同形）
         self._heart = self._load("heart.png")
         self._progress_matcher = None
         try:
@@ -116,6 +117,10 @@ class BattleTracker:
         if sword is None and self._yicon is not None:
             # 新UI锚点：Y形图标（与剑形并列，不同关卡二选一，位置一致）
             sword = self._match(band, self._scale(self._yicon, W, H), SWORD_THRESHOLD)
+        if sword is None and self._bossicon is not None:
+            # BOSS战锚点：翼状菱形（旧存档帧同形，sword宽版含大块黑边在
+            # 渐变背景上匹配失败0.516，bossicon紧版1.000）
+            sword = self._match(band, self._scale(self._bossicon, W, H), SWORD_THRESHOLD)
         if sword is None:
             return None
         sw = (x0 + sword[1], y0 + sword[2], x0 + sword[1] + sword[3], y0 + sword[2] + sword[4])
@@ -209,6 +214,11 @@ class BattleTracker:
                               max(m[2], c[2]), max(m[3], c[3]), m[4] + c[4])
             else:
                 merged.append(c)
+        # 前导大间隔过滤：BOSS战关卡文本（2-7）比普通战宽~4px，rx0(+42)
+        # 会切入其尾部组件（误读如 7），与进度数字间隔~25px；数字内部
+        # 间距仅 4-7px → 间隔>12px 的前导组件判定为关卡残留，丢弃
+        if len(merged) >= 2 and merged[1][0] - merged[0][2] > 12:
+            merged = merged[1:]
         # 逐组件识别（连续前缀）：从左到右匹配，首个失败段（% 碎片/噪声）
         # 之后的组件忽略——% 符号恒在数字右侧
         digits = []
