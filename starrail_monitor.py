@@ -1275,6 +1275,18 @@ class MonitorApp:
         self.cb_sound_trig = tk.Checkbutton(row3, text="声音触发(需音效样本)",
                                             variable=self.var_sound_trig)
         self.cb_sound_trig.pack(side="left", padx=16)
+        row4 = tk.Frame(frm2)
+        row4.pack(fill="x", pady=(2, 0))
+        self.var_battle_end_notify = tk.BooleanVar(
+            value=self.cfg.get("battle_end_notify", True))
+        self.cb_battle_end_notify = tk.Checkbutton(
+            row4, text="对局结束弹窗提醒", variable=self.var_battle_end_notify)
+        self.cb_battle_end_notify.pack(side="left")
+        tk.Label(row4, text="延迟(秒):").pack(side="left", padx=(16, 2))
+        self.sp_battle_end_delay = tk.Spinbox(
+            row4, from_=0, to=300, width=5,
+            textvariable=tk.StringVar(value=str(self.cfg.get("battle_end_notify_delay", 10))))
+        self.sp_battle_end_delay.pack(side="left")
 
         frm3 = tk.Frame(root)
         frm3.pack(fill="x", **pad)
@@ -1657,6 +1669,11 @@ class MonitorApp:
         self.cfg["save_frames"] = self.var_save.get()
         self.cfg["allow_action_reset"] = self.var_reset.get()
         self.cfg["sound_trigger"] = self.var_sound_trig.get()
+        self.cfg["battle_end_notify"] = self.var_battle_end_notify.get()
+        try:
+            self.cfg["battle_end_notify_delay"] = int(self.sp_battle_end_delay.get())
+        except ValueError:
+            pass
         save_config(self.cfg)
 
     def show_preview(self):
