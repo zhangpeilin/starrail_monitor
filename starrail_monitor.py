@@ -1212,6 +1212,16 @@ class MonitorApp:
         else:
             self.log("未配置监测区域：请点击「选择监测区域」后手动开始", tag="event")
 
+    def _save_battle_end_cfg(self):
+        """对局结束提醒配置即时保存（勾选/改延迟立即写入 config.json）"""
+        try:
+            self.cfg["battle_end_notify"] = self.var_battle_end_notify.get()
+            self.cfg["battle_end_notify_delay"] = max(
+                0, int(self.sp_battle_end_delay.get()))
+            save_config(self.cfg)
+        except Exception:
+            pass
+
     # ---------------- UI ----------------
     def _build_ui(self):
         root = self.root
@@ -1280,13 +1290,18 @@ class MonitorApp:
         self.var_battle_end_notify = tk.BooleanVar(
             value=self.cfg.get("battle_end_notify", True))
         self.cb_battle_end_notify = tk.Checkbutton(
-            row4, text="对局结束弹窗提醒", variable=self.var_battle_end_notify)
+            row4, text="对局结束弹窗提醒", variable=self.var_battle_end_notify,
+            command=self._save_battle_end_cfg)
         self.cb_battle_end_notify.pack(side="left")
         tk.Label(row4, text="延迟(秒):").pack(side="left", padx=(16, 2))
         self.sp_battle_end_delay = tk.Spinbox(
             row4, from_=0, to=300, width=5,
-            textvariable=tk.StringVar(value=str(self.cfg.get("battle_end_notify_delay", 10))))
+            textvariable=tk.StringVar(value=str(self.cfg.get("battle_end_notify_delay", 10))),
+            command=self._save_battle_end_cfg)
         self.sp_battle_end_delay.pack(side="left")
+        # 手动输入数字后失焦/回车即时保存
+        self.sp_battle_end_delay.bind("<FocusOut>", lambda e: self._save_battle_end_cfg())
+        self.sp_battle_end_delay.bind("<Return>", lambda e: self._save_battle_end_cfg())
 
         frm3 = tk.Frame(root)
         frm3.pack(fill="x", **pad)
