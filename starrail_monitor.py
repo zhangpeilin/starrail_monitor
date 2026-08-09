@@ -921,6 +921,15 @@ DEFAULT_CONFIG = {
     "game_process": "StarRail.exe",  # 游戏进程名（声音捕获目标）
     "battle_progress": True,         # 对局进度/开始结束监测（需 templates/battle/ 模板）
     "battle_interval_s": 1.0,        # 对局进度检测间隔（秒）
+    "battle_end_notify": True,       # 对局结束弹窗提醒（本游戏前台或运行其他游戏时不弹）
+    "battle_end_notify_delay": 10,   # 对局结束后延迟弹窗秒数（避开结算动画）
+    "other_game_processes": [        # 常见其他游戏进程：存在任一则跳过对局结束弹窗
+        "League of Legends.exe", "LeagueClient.exe", "GenshinImpact.exe",
+        "YuanShen.exe", "naraka.exe", "csgo.exe", "cs2.exe", "dota2.exe",
+        "overwatch.exe", "valorant.exe", "PUBG.exe", "WarThunder.exe",
+        "WorldOfWarcraft.exe", "PathOfExile.exe", "Minecraft.exe",
+        "ZZZ.exe", "RobloxPlayerBeta.exe",
+    ],
 }
 
 
@@ -1608,6 +1617,9 @@ class MonitorApp:
                     self.msg_queue.put({"status": "对局开始"})
                 elif ev_type == "battle_end":
                     self.msg_queue.put({"status": "对局结束", "info": msg})
+                    if self.cfg.get("battle_end_notify", True):
+                        delay = max(0.0, float(self.cfg.get("battle_end_notify_delay", 10)))
+                        self.root.after(int(delay * 1000), self._maybe_notify_battle_end)
                 elif ev_type == "progress":
                     self.msg_queue.put({"status": "进度",
                                         "info": "进度 %d%%" % msg})
@@ -1861,6 +1873,101 @@ class MonitorApp:
                 self.msg_queue.put({"status": "异常: %s" % e})
                 self.consecutive = 0
             time.sleep(max(0.05, interval / 1000.0 - (time.time() - t0)))
+
+    # ---------------- 对局结束提醒 ----------------
+    def _maybe_notify_battle_end(self):
+        """对局结束提醒条件检查（延迟后由 root.after 在主线程调用）：
+        本游戏窗口不在前台 且 系统未运行其他常见游戏 → 弹窗"""
+        if getattr(self, "battle_end_win", None) is not None:
+            return
+        if not self.cfg.get("battle_end_notify", True):
+            return
+        if self._game_foreground():
+            self.log("对局结束提醒跳过：游戏窗口在前台", tag="event")
+            return
+        if self._other_game_running():
+            self.log("对局结束提醒跳过：检测到其他游戏运行", tag="event")
+            return
+        self.show_battle_end_notify()
+
+    def _game_foreground(self):
+        """本游戏窗口是否在前台（GetForegroundWindow 对比标题关键字窗口）"""
+        try:
+            import ctypes
+            user32 = ctypes.windll.user32
+            fg = user32.GetForegroundWindow()
+            if not fg:
+                return False
+            kw = self.cfg.get("window_keyword", "崩坏")
+            buf = ctypes.create_unicode_buffer(256)
+            user32.GetWindowTextW(fg, buf, 256)
+            return kw in buf.value
+        except Exception:
+            return False
+
+    def _other_game_running(self):
+        """枚举系统进程，命中 other_game_processes 任一进程名返回 True"""
+        procs = self.cfg.get("other_game_processes", [])
+        if not procs:
+            return False
+        targets = {p.strip().lower() for p in procs if p.strip()}
+        try:
+            import ctypes
+            TH32CS_SNAPPROCESS = 0x2
+            kernel32 = ctypes.windll.kernel32
+            PROCESSENTRY32 = ctypes.c_ubyte * 568  # sizeof(PROCESSENTRY32W)
+            h = kernel32.CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0)
+            if h == -1:
+                return False
+            try:
+                entry = PROCESSENTRY32()
+                ctypes.cast(entry, ctypes.POINTER(ctypes.c_ubyte))[0:4] = (
+                    (4).to_bytes(4, "little"))  # dwSize
+                if kernel32.Process32FirstW(h, ctypes.byref(entry)):
+                    while True:
+                        # szExeFile 从偏移 36 开始（WCHAR[260]）
+                        raw = bytes(entry)[36:36 + 260 * 2]
+                        name = raw.split(b"\x00\x00")[0].decode(
+                            "utf-16-le", errors="ignore").strip().lower()
+                        if name in targets:
+                            return True
+                        if not kernel32.Process32NextW(h, ctypes.byref(entry)):
+                            break
+            finally:
+                kernel32.CloseHandle(h)
+        except Exception:
+            pass
+        return False
+
+    def show_battle_end_notify(self):
+        """对局结束温和弹窗（蓝色系，不蜂鸣；按钮/自动关闭防残留）"""
+        if getattr(self, "battle_end_win", None) is not None:
+            return
+        win = tk.Toplevel(self.root)
+        win.title("对局结束")
+        bg = "#1565c0"          # 温和蓝
+        win.configure(bg=bg)
+        win.attributes("-topmost", True)
+        win.geometry("400x200+%d+%d" % (self.root.winfo_screenwidth() // 2 - 200,
+                                        self.root.winfo_screenheight() // 2 - 140))
+        tk.Label(win, text="对局已结束", font=("Microsoft YaHei UI", 20, "bold"),
+                 bg=bg, fg="white").pack(pady=(26, 6))
+        tk.Label(win, text="本场战斗已结束，可进行下一场",
+                 font=("Microsoft YaHei UI", 11), bg=bg, fg="#d6e6ff").pack(pady=4)
+        tk.Button(win, text="知道了", command=lambda: self._close_battle_end_notify(win),
+                  bg="#ffffff", fg=bg, font=("Microsoft YaHei UI", 11),
+                  relief="flat", padx=18, pady=4).pack(pady=(14, 6))
+        self.battle_end_win = win
+        # 60 秒未操作自动关闭（温和提醒不强制）
+        win.after(60000, lambda: self._close_battle_end_notify(win))
+
+    def _close_battle_end_notify(self, win):
+        try:
+            win.destroy()
+        except Exception:
+            pass
+        if getattr(self, "battle_end_win", None) is win:
+            self.battle_end_win = None
 
     # ---------------- 提醒弹窗 ----------------
     def show_alert(self, turn, action):
