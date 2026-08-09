@@ -1155,6 +1155,7 @@ class MonitorApp:
         # 日志门控（借鉴 ok-nte LogGate）：未识别节流 + 数值变化轨迹
         self._log_gate = LogGate()
         self._last_logged_val = None
+        self._last_progress_log = None   # 进度日志去重（值不变不刷屏）
         self._build_ui()
         # 对局监测初始化（需在 _build_ui 之后，self.log 依赖 txt_log）
         self._init_battle_tracker()
@@ -1187,6 +1188,20 @@ class MonitorApp:
             self.log("已加载屏幕监测区域 %s" % (self.cfg["region"],))
         else:
             self.log("尚未选择监测区域，请点击「选择监测区域」")
+        # 启动后自动开始监测（已配置区域时；未配置则提示手动选择，不弹校准窗）
+        self.root.after(800, self._auto_start)
+
+    def _auto_start(self):
+        """启动自动开始监测：已配置区域直接进入监测，未配置则提示"""
+        if self.running:
+            return
+        mode = self.cfg.get("capture_mode", "window")
+        region = self.cfg.get("win_region" if mode == "window" else "region")
+        if region:
+            self.log("自动开始监测", tag="event")
+            self.start_monitor()
+        else:
+            self.log("未配置监测区域：请点击「选择监测区域」后手动开始", tag="event")
 
     # ---------------- UI ----------------
     def _build_ui(self):
@@ -1924,17 +1939,21 @@ class MonitorApp:
                     self.log("声音: %s" % msg["info"], tag="sound")
                 if msg.get("status") == "对局开始":
                     self._progress_disp = "--"
+                    self._last_progress_log = None
                     self._refresh_values()
                     self.log("对局开始：新对局数值已重置接受", tag="event")
                 if msg.get("status") == "对局结束" and msg.get("info"):
                     self.log("对局结束：%s" % msg["info"], tag="event")
                 if msg.get("status") == "进度" and msg.get("info"):
-                    self.log("进度: %s" % msg["info"])
                     # GUI 同步显示：进度消息仅每秒一次，回合/行动值消息更频繁
                     m = re.search(r"进度 (\d+)%", msg["info"])
                     if m:
                         self._progress_disp = m.group(1) + "%"
                         self._refresh_values()
+                    # 日志去重：进度值不变时不记录，避免每秒刷屏
+                    if msg["info"] != self._last_progress_log:
+                        self._last_progress_log = msg["info"]
+                        self.log("进度: %s" % msg["info"])
                 if msg.get("status") == "关卡" and msg.get("info"):
                     self.log("关卡: %s" % msg["info"], tag="event")
                 if msg.get("status") == "进度告警" and msg.get("info"):
