@@ -1617,6 +1617,7 @@ class MonitorApp:
                     self.msg_queue.put({"status": "对局开始"})
                 elif ev_type == "battle_end":
                     self.msg_queue.put({"status": "对局结束", "info": msg})
+                    self._last_battle_end_msg = msg
                     if self.cfg.get("battle_end_notify", True):
                         delay = max(0.0, float(self.cfg.get("battle_end_notify_delay", 10)))
                         self.root.after(int(delay * 1000), self._maybe_notify_battle_end)
@@ -1943,20 +1944,34 @@ class MonitorApp:
         """对局结束温和弹窗（蓝色系，不蜂鸣；按钮/自动关闭防残留）"""
         if getattr(self, "battle_end_win", None) is not None:
             return
+        msg = getattr(self, "_last_battle_end_msg", None) or ""
+        # 解析结果与最终进度：消息格式 "对局成功（进度84%）"/"对局结束未完成（进度?%）"
+        m = re.search(r"对局(\S+?)（进度(\S+?)%）", msg)
+        if m:
+            result = "成功" if m.group(1) == "成功" else "失败"
+            progress = m.group(2)
+        else:
+            result, progress = "结束", "?"
+        t, a = getattr(self, "_last_vals", (None, None))
+        ts = "--" if t is None else str(t)
+        as_ = "--" if a is None else str(a)
         win = tk.Toplevel(self.root)
         win.title("对局结束")
         bg = "#1565c0"          # 温和蓝
         win.configure(bg=bg)
         win.attributes("-topmost", True)
-        win.geometry("400x200+%d+%d" % (self.root.winfo_screenwidth() // 2 - 200,
-                                        self.root.winfo_screenheight() // 2 - 140))
+        win.geometry("420x230+%d+%d" % (self.root.winfo_screenwidth() // 2 - 210,
+                                        self.root.winfo_screenheight() // 2 - 150))
         tk.Label(win, text="对局已结束", font=("Microsoft YaHei UI", 20, "bold"),
-                 bg=bg, fg="white").pack(pady=(26, 6))
-        tk.Label(win, text="本场战斗已结束，可进行下一场",
+                 bg=bg, fg="white").pack(pady=(22, 4))
+        result_color = "#b9f6ca" if result == "成功" else "#ffd9c9"
+        tk.Label(win, text="结果：%s    最终进度：%s%%" % (result, progress),
+                 font=("Microsoft YaHei UI", 14, "bold"), bg=bg, fg=result_color).pack(pady=4)
+        tk.Label(win, text="最后一次抓取：回合 %s   行动值 %s" % (ts, as_),
                  font=("Microsoft YaHei UI", 11), bg=bg, fg="#d6e6ff").pack(pady=4)
         tk.Button(win, text="知道了", command=lambda: self._close_battle_end_notify(win),
                   bg="#ffffff", fg=bg, font=("Microsoft YaHei UI", 11),
-                  relief="flat", padx=18, pady=4).pack(pady=(14, 6))
+                  relief="flat", padx=18, pady=4).pack(pady=(12, 6))
         self.battle_end_win = win
         # 60 秒未操作自动关闭（温和提醒不强制）
         win.after(60000, lambda: self._close_battle_end_notify(win))
