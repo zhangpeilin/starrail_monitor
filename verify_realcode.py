@@ -12,7 +12,7 @@ RX0, RY0, RX1, RY1 = 102, 21, 179, 53
 def recognize(gray):
     sub = gray[RY0:RY1, RX0:RX1]
     mask = sub > 180
-    if int(mask.sum()) < 10:
+    if int(mask.sum()) < 50:
         return None
     comps = [c for c in _sm.components(mask) if c[4] >= 15]
     if not comps:

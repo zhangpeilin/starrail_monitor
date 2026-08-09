@@ -169,7 +169,10 @@ class BattleTracker:
             return None
         sub = gray[ry0:ry1, rx0:rx1]
         mask = sub > 180
-        if int(mask.sum()) < 10:
+        # 数字区内容极少（<50）= 数字切换过渡帧/残影（正常帧最小 mask 95，
+        # 过渡帧仅 ~25 且只剩底部小段）；直接拒绝避免 OCR 兜底随机误读
+        # （如 21 过渡帧被读成 7），保持上次值不污染基线
+        if int(mask.sum()) < 50:
             return None
         # 数字组件 + 列投影分离（44 合并）+ x 重叠聚类合并（0 断裂）
         import starrail_monitor as _sm
