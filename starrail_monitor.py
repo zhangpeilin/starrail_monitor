@@ -1201,9 +1201,11 @@ class MonitorApp:
         frm.pack(fill="x", **pad)
         self.lbl_status = tk.Label(frm, text="未开始", font=("Microsoft YaHei UI", 11, "bold"))
         self.lbl_status.pack(side="left")
-        self.lbl_values = tk.Label(frm, text="回合数: --  行动值: --",
+        self.lbl_values = tk.Label(frm, text="回合数: --  行动值: --  进度: --",
                                    font=("Microsoft YaHei UI", 11))
         self.lbl_values.pack(side="right")
+        self._last_vals = (None, None)   # 最近一次回合/行动值（进度消息重绘用）
+        self._progress_disp = "--"       # 最近一次进度显示文本（如 50%）
 
         frm2 = tk.LabelFrame(root, text="提醒参数", padx=8, pady=6)
         frm2.pack(fill="x", **pad)
@@ -1439,13 +1441,23 @@ class MonitorApp:
         turn, action, info = extract_column(self.ocr, col)
         return turn, action, info, col
 
+    def _refresh_values(self):
+        """统一重绘数值显示：回合数/行动值 + 对局进度"""
+        t, a = self._last_vals
+        ts = "--" if t is None else str(t)
+        as_ = "--" if a is None else str(a)
+        self.lbl_values.configure(
+            text="回合数: %s  行动值: %s  进度: %s" % (ts, as_, self._progress_disp))
+
     def test_once(self):
         turn, action, info, _ = self.recognize()
         if turn is None and action is None:
             self.log("测试结果: 未识别到数字（%s）" % info)
-            self.lbl_values.configure(text="回合数: --  行动值: --")
+            self._last_vals = (None, None)
+            self._refresh_values()
             return
-        self.lbl_values.configure(text="回合数: %s  行动值: %s" % (turn, action))
+        self._last_vals = (turn, action)
+        self._refresh_values()
         self.log("测试结果: 回合数=%s 行动值=%s（%s）" % (turn, action, info))
 
     # ---------------- 监控循环 ----------------
@@ -1900,8 +1912,8 @@ class MonitorApp:
                 if "status" in msg:
                     self.lbl_status.configure(text=msg["status"])
                 if "turn" in msg:
-                    self.lbl_values.configure(text="回合数: %s  行动值: %s"
-                                               % (msg["turn"], msg["action"]))
+                    self._last_vals = (msg["turn"], msg["action"])
+                    self._refresh_values()
                     # 数值变化轨迹（changed 模式）：回合/行动值变化时记录一条，
                     # 不变时静默——事后可从日志还原完整数值变化时间线
                     cur = (msg["turn"], msg["action"])
@@ -1911,11 +1923,18 @@ class MonitorApp:
                 if msg.get("status") == "声音事件" and msg.get("info"):
                     self.log("声音: %s" % msg["info"], tag="sound")
                 if msg.get("status") == "对局开始":
+                    self._progress_disp = "--"
+                    self._refresh_values()
                     self.log("对局开始：新对局数值已重置接受", tag="event")
                 if msg.get("status") == "对局结束" and msg.get("info"):
                     self.log("对局结束：%s" % msg["info"], tag="event")
                 if msg.get("status") == "进度" and msg.get("info"):
                     self.log("进度: %s" % msg["info"])
+                    # GUI 同步显示：进度消息仅每秒一次，回合/行动值消息更频繁
+                    m = re.search(r"进度 (\d+)%", msg["info"])
+                    if m:
+                        self._progress_disp = m.group(1) + "%"
+                        self._refresh_values()
                 if msg.get("status") == "关卡" and msg.get("info"):
                     self.log("关卡: %s" % msg["info"], tag="event")
                 if msg.get("status") == "进度告警" and msg.get("info"):
