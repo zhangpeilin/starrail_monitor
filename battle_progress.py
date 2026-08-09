@@ -238,22 +238,11 @@ class BattleTracker:
             if v <= 100:
                 return v
         # 断裂模式防御：组件 ≥2 且模板全失败 = 断裂数字（0/8 渲染断裂，
-        # 段形态与模板差大），整窗 OCR 对断裂形态不稳定（同一帧读 1/0 随机，
-        # 曾致 0→1 误读被接受后连环告警）→ 拒绝识别，保持上次值
+        # 段形态与模板差大）→ 拒绝识别，保持上次值
         if len(merged) >= 2:
             return None
-        # 兜底：整窗口 OCR（单数字完整形态场景）
-        crop = Image.fromarray(255 - (sub > 150).astype(np.uint8) * 255).resize(
-            (mask.shape[1] * 6, mask.shape[0] * 6), Image.LANCZOS)
-        text = self._ocr_digits(crop)
-        for m_ in re.findall(r"(\d{1,3})", text):
-            v = int(m_)
-            if v <= 100:
-                return v
-        if len(text) >= 2:
-            v = int(text[-2:])
-            if v <= 100:
-                return v
+        # 整窗 OCR 兜底已移除（与 _match_progress_digit 同步，2026-08-09）：
+        # 单段模板全失败 = 残缺/噪声段（数字切换过渡帧等），拒绝保持上次值
         return None
 
     def _match_progress_digit(self, seg):
@@ -298,12 +287,9 @@ class BattleTracker:
                 # 自动变体采集已关闭（误配段会污染模板库，如 8 段误配 3）；
                 # 模板积累改由 scan_progress_templates.py 离线扫描完成
                 return best_d
-        # OCR 兜底（0/4/5/6/9 等缺模板数字）
-        crop = Image.fromarray((255 - seg.astype(np.uint8) * 255)).resize(
-            (w_new * 8, 16 * 8), Image.LANCZOS)
-        text = self._ocr_digits(crop)
-        if len(text) == 1 and text.isdigit():
-            return int(text)
+        # OCR 兜底已移除（2026-08-09）：对残缺/噪声段不稳定，曾致 0→1、
+        # 5→7、21→7、8→18 连环误读；当前 0-9 模板齐备带变体，模板
+        # 全失败 = 残缺/噪声段 → 拒绝识别保持上次值（宁缺毋滥）
         return None
 
     def read_stage(self, gray, sword_rect):
