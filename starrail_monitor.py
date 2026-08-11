@@ -2082,7 +2082,10 @@ class MonitorApp:
             while True:
                 msg = self.msg_queue.get_nowait()
                 if "alert" in msg:
-                    self.show_alert(msg["turn"], msg["action"])
+                    if self._game_foreground():
+                        self.log("行动值提醒跳过：游戏窗口在前台", tag="event")
+                    else:
+                        self.show_alert(msg["turn"], msg["action"])
                 if "status" in msg:
                     self.lbl_status.configure(text=msg["status"])
                 if "turn" in msg:
