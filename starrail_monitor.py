@@ -1268,22 +1268,27 @@ class MonitorApp:
         self.var_reset = tk.BooleanVar(value=self.cfg.get("allow_action_reset", True))
         row2 = tk.Frame(frm2)
         row2.pack(fill="x", pady=(4, 0))
-        self.cb_sound = tk.Checkbutton(row2, text="声音提醒", variable=self.var_sound)
+        self.cb_sound = tk.Checkbutton(row2, text="声音提醒", variable=self.var_sound,
+                                       command=self._sync_params)
         self.cb_sound.pack(side="left")
-        self.cb_log = tk.Checkbutton(row2, text="记录历史", variable=self.var_log)
+        self.cb_log = tk.Checkbutton(row2, text="记录历史", variable=self.var_log,
+                                     command=self._sync_params)
         self.cb_log.pack(side="left", padx=16)
-        self.cb_save = tk.Checkbutton(row2, text="保存识别画面", variable=self.var_save)
+        self.cb_save = tk.Checkbutton(row2, text="保存识别画面", variable=self.var_save,
+                                      command=self._sync_params)
         self.cb_save.pack(side="left", padx=16)
-        self.cb_reset = tk.Checkbutton(row2, text="允许行动值突变(3帧确认)", variable=self.var_reset)
+        self.cb_reset = tk.Checkbutton(row2, text="允许行动值突变(3帧确认)", variable=self.var_reset,
+                                       command=self._sync_params)
         self.cb_reset.pack(side="left", padx=16)
         row3 = tk.Frame(frm2)
         row3.pack(fill="x", pady=(2, 0))
         self.cb_fg = tk.Checkbutton(row3, text="仅游戏窗口在前台时监测(屏幕模式)",
-                                    variable=self.var_fg)
+                                    variable=self.var_fg, command=self._sync_params)
         self.cb_fg.pack(side="left")
         self.var_sound_trig = tk.BooleanVar(value=self.cfg.get("sound_trigger", False))
         self.cb_sound_trig = tk.Checkbutton(row3, text="声音触发(需音效样本)",
-                                            variable=self.var_sound_trig)
+                                            variable=self.var_sound_trig,
+                                            command=self._sync_params)
         self.cb_sound_trig.pack(side="left", padx=16)
         row4 = tk.Frame(frm2)
         row4.pack(fill="x", pady=(2, 0))
